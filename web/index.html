@@ -3,20 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ROS2 中文教材 · 从零到移动机器人全栈</title>
+<title>ROS2 机器人测试教材 · 面向机器人测试工程师</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-page="home" data-root="">
 <main class="content">
 
 <div class="hero">
-  <h1>ROS / ROS2 中文系统教材</h1>
-  <p class="lead">从零基础到能独立完成「仿真小车 + SLAM 建图 + 自主导航」的完整学习路线。以 ROS2 Jazzy 为主线，Humble 用户只需把发行版名替换即可；关键位置对照 ROS1 Noetic。</p>
+  <h1>ROS2 机器人测试教材</h1>
+  <p class="lead">面向有开发经验、想从事机器人测试或测试开发的工程师。前 16 章打牢 ROS2 基础，并在每章末尾的「测试视角」里说明这些知识在测试工作中怎么用；第七部分系统讲解机器人测试：单元与组件测试、launch_testing 集成测试、仿真场景测试、数据回放、性能与稳定性、实机与现场测试，最后为一个完整的巡逻机器人建立测试体系。</p>
   <div class="meta-bar">
-    <span class="tag">16 章正文</span>
-    <span class="tag">6 套练习 + 参考答案</span>
-    <span class="tag">4 个附录</span>
-    <span class="tag">Python + C++ 双语示例</span>
+    <span class="tag">16 章 ROS2 基础</span>
+    <span class="tag">8 篇机器人测试</span>
+    <span class="tag">每章「测试视角」</span>
+    <span class="tag">练习 + 参考答案</span>
+    <span class="tag">ROS2 Jazzy</span>
     <span class="tag">可离线阅读</span>
   </div>
 </div>
@@ -26,25 +27,44 @@
 <div class="progress-bar"><div id="progress-bar"></div></div>
 <p id="progress-text" style="color:var(--fg-soft);font-size:14px"></p>
 
-<h2>全部章节</h2>
+<h2>机器人测试工程师做什么</h2>
+<p>机器人测试和普通软件测试最大的区别是：被测对象会在物理世界里运动，输入来自有噪声的传感器，输出是力和速度，失败的代价可能是撞坏设备或伤到人。因此机器人测试工程师的日常工作通常包括：</p>
+<table>
+  <thead><tr><th>工作内容</th><th>需要的能力</th><th>本教材对应</th></tr></thead>
+  <tbody>
+    <tr><td>读懂系统：节点、话题、坐标系、启动流程</td><td>ROS2 基础、看懂 launch 和参数</td><td>第 1–9 章</td></tr>
+    <tr><td>为模块编写自动化测试，接入 CI</td><td>pytest、gtest、launch_testing、colcon test</td><td>第 10 章、T2、T3</td></tr>
+    <tr><td>在仿真中批量跑场景，统计成功率</td><td>Gazebo、Nav2、场景脚本</td><td>第 9、13 章、T4</td></tr>
+    <tr><td>录包、回放、复现现场问题</td><td>rosbag2、数据分析脚本</td><td>第 11 章、T5</td></tr>
+    <tr><td>测延迟、频率、资源占用，跑长稳</td><td>Linux 性能工具、统计</td><td>T6</td></tr>
+    <tr><td>制定测试计划，带队做实机与现场测试，写缺陷报告</td><td>用例设计、安全意识、沟通</td><td>T7</td></tr>
+  </tbody>
+</table>
+
+<h2>第一部分到第六部分：ROS2 基础</h2>
 <div class="card-grid" id="chapter-cards"></div>
 
-<h2>推荐学习路线（6 周）</h2>
+<h2>第七部分：机器人测试</h2>
+<div class="card-grid" id="testing-cards"></div>
+
+<h2>推荐学习路线（7 周）</h2>
+<p>基础章节和测试篇穿插进行：每学一块 ROS2 知识，马上学习怎么测它。</p>
 <table>
-  <thead><tr><th>周次</th><th>章节</th><th>本周目标</th><th>可交付成果</th></tr></thead>
+  <thead><tr><th>周次</th><th>内容</th><th>本周目标</th><th>可交付成果</th></tr></thead>
   <tbody>
-    <tr><td>第 1 周</td><td>1–3 章</td><td>理解 ROS2 是什么，装好环境，写出第一个节点</td><td>能运行自己写的 talker / listener</td></tr>
-    <tr><td>第 2 周</td><td>4–6 章</td><td>掌握话题、服务、参数、动作、Launch</td><td>一个用 launch 启动的多节点小系统</td></tr>
-    <tr><td>第 3 周</td><td>7–9 章</td><td>坐标变换、机器人建模、Gazebo 仿真</td><td>在 Gazebo 中能用键盘开动的差速小车</td></tr>
-    <tr><td>第 4 周</td><td>10–12 章</td><td>工程化：构建、测试、调试、录包、ros2_control</td><td>带单元测试、可录包复现的功能包</td></tr>
-    <tr><td>第 5 周</td><td>13–15 章</td><td>导航、机械臂、感知</td><td>仿真里完成 SLAM 建图与点到点导航</td></tr>
-    <tr><td>第 6 周</td><td>16 章 + 练习</td><td>综合项目</td><td>多航点巡逻的小车 + 项目 README + 演示录包</td></tr>
+    <tr><td>第 1 周</td><td>1–3 章 + T1</td><td>装好环境，理解 ROS2 和机器人测试的全貌</td><td>能运行自己写的节点；能画出测试分层图</td></tr>
+    <tr><td>第 2 周</td><td>4–6 章 + T2</td><td>话题、服务、参数、Launch；为节点写单元与组件测试</td><td>节点回调的 pytest 测试，覆盖率报告</td></tr>
+    <tr><td>第 3 周</td><td>7–9 章 + T3</td><td>TF、URDF、仿真；用 launch_testing 做黑盒集成测试</td><td>能在 colcon test 中运行的 launch 测试</td></tr>
+    <tr><td>第 4 周</td><td>10–12 章 + T5</td><td>工程化、录包；用 bag 复现问题并做回归</td><td>一个基于 bag 的回归测试</td></tr>
+    <tr><td>第 5 周</td><td>13 章 + T4（14、15 章选读）</td><td>Nav2 导航；在无界面仿真中批量跑场景</td><td>场景测试脚本 + 成功率统计</td></tr>
+    <tr><td>第 6 周</td><td>16 章 + T6</td><td>完成巡逻小车；测性能、跑长稳、做故障注入</td><td>性能测试报告</td></tr>
+    <tr><td>第 7 周</td><td>T7 + T8</td><td>测试计划、现场测试方法；为巡逻小车建立完整测试体系</td><td>测试策略、CI 流水线、测试报告、缺陷报告</td></tr>
   </tbody>
 </table>
 
 <div class="callout tip">
-  <strong>每天 1.5 – 2 小时即可</strong>
-  <p>建议「读 30 分钟 + 敲代码 60 分钟 + 写笔记 15 分钟」。ROS 是工程技能，只读不敲几乎学不会。每章都有可直接复制的命令和代码，复制后请逐行读懂再运行。</p>
+  <strong>已有开发经验时怎么读</strong>
+  <p>第 1–9 章可以快速通读，重点放在「测试视角」小节和每章的易错点上——这些易错点正是测试中最常发现的缺陷。第 10–13 章和测试篇需要逐行动手。建议每天「读 30 分钟 + 动手 60 分钟」。</p>
 </div>
 
 <h2>前置知识</h2>
@@ -86,6 +106,8 @@
   <li><a href="https://moveit.picknik.ai/main/index.html" target="_blank" rel="noopener">MoveIt 2 文档</a></li>
   <li><a href="https://control.ros.org/" target="_blank" rel="noopener">ros2_control 文档</a></li>
   <li><a href="https://gazebosim.org/docs" target="_blank" rel="noopener">Gazebo 文档</a></li>
+  <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Testing-Main.html" target="_blank" rel="noopener">ROS2 官方测试教程</a>（colcon test、pytest、gtest、launch_testing）</li>
+  <li><a href="https://github.com/ros2/launch/tree/rolling/launch_testing" target="_blank" rel="noopener">launch_testing 源码与示例</a></li>
   <li><a href="https://robotics.stackexchange.com/questions/tagged/ros2" target="_blank" rel="noopener">Robotics Stack Exchange（ROS 问答）</a></li>
 </ul>
 

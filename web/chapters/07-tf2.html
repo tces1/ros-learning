@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 7 章 TF2 坐标变换 · ROS2 中文教材</title>
+<title>第 7 章 TF2 坐标变换 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch07" data-root="../">
@@ -291,6 +291,41 @@ ros2 topic echo /tf --once
 ros2 topic echo /tf_static --qos-durability transient_local --once
 </script>
 <p><strong>RViz2</strong>：添加 TF 显示，勾选 Show Names。Fixed Frame 选 <code>odom</code>，运行 7.5 的 fake_odom，可以看到 base_link 在绕圈。若某坐标系显示为红色警告，说明从它到 Fixed Frame 没有可用变换。</p>
+
+<h2>测试视角</h2>
+<p>TF 错误通常不会让系统崩溃，而是让机器人「看错位置」：障碍物在代价地图中偏了 10 cm，机器人转弯时擦到桌角。TF 是测试中最值得自动检查的内容之一。</p>
+<table>
+  <thead><tr><th>检查项</th><th>方法</th><th>常见缺陷</th></tr></thead>
+  <tbody>
+    <tr><td>树结构完整、每个坐标系只有一个父节点</td><td><code>ros2 run tf2_tools view_frames</code></td><td>两个节点同时发布 map→odom（SLAM 与 AMCL 同时运行）</td></tr>
+    <tr><td>静态变换数值正确</td><td>与机械图纸、卷尺实测对比</td><td>雷达安装位置、朝向写错；单位写成毫米</td></tr>
+    <tr><td>动态变换频率</td><td><code>ros2 run tf2_ros tf2_monitor</code></td><td>频率过低导致外推错误</td></tr>
+    <tr><td>时间戳</td><td>观察外推错误日志</td><td>use_sim_time 不一致；时钟不同步</td></tr>
+    <tr><td>方向约定</td><td>台架上让机器人前进，观察 odom→base_link 的 x 增加</td><td>坐标轴方向与 REP-103 不一致</td></tr>
+  </tbody>
+</table>
+<p>静态变换可以写成自动化测试：在 launch 测试中启动 robot_state_publisher，查询变换并与期望值比较。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="TF 断言片段（放在 launch 测试的活动测试中）">
+import rclpy
+from rclpy.duration import Duration
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
+
+
+def lookup(node, target, source, timeout=5.0):
+    buf = Buffer()
+    TransformListener(buf, node)
+    end = node.get_clock().now() + Duration(seconds=timeout)
+    while node.get_clock().now() < end:
+        rclpy.spin_once(node, timeout_sec=0.1)
+        if buf.can_transform(target, source, Time()):
+            return buf.lookup_transform(target, source, Time()).transform
+    raise AssertionError(f'{target} -> {source} 的变换在 {timeout} s 内不可用')
+
+# 在测试方法中：
+#   t = lookup(self.node, 'base_link', 'laser_link')
+#   self.assertAlmostEqual(t.translation.z, 0.12, delta=0.005)   # 与机械图纸一致
+</script>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 一个坐标系能有两个父坐标系吗？如果 AMCL 和 EKF 都发布 odom→base_link 会怎样？</summary>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 5 章 服务、参数与动作 · ROS2 中文教材</title>
+<title>第 5 章 服务、参数与动作 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch05" data-root="../">
@@ -440,6 +440,35 @@ ros2 action info /move_distance
     <tr><td><code>actionlib</code></td><td><code>rclpy.action</code> / <code>rclcpp_action</code>，内置于核心</td></tr>
   </tbody>
 </table>
+
+<h2>测试视角</h2>
+<p>服务、参数、动作都是系统的「控制面」接口，测试时按接口契约逐项检查：</p>
+<table>
+  <thead><tr><th>接口</th><th>必测项</th></tr></thead>
+  <tbody>
+    <tr><td>服务</td><td>合法请求；非法请求（越界、未知枚举）被拒绝且<strong>不改变状态</strong>；重复请求幂等；服务端未启动时客户端超时处理；并发调用</td></tr>
+    <tr><td>参数</td><td>非法值被拒绝且原值保留；运行时修改立即生效；参数文件中拼错的参数名（ROS2 默认会忽略未声明的参数！）；节点重启后运行时修改是否丢失</td></tr>
+    <tr><td>动作</td><td>正常完成；执行中取消；执行中发送新目标（抢占）；反馈频率；执行失败时的结果；动作服务端在执行中崩溃，客户端如何感知</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+# 服务：边界值与非法值
+ros2 service call /set_mode my_interfaces/srv/SetMode "{mode: 2}"
+ros2 service call /set_mode my_interfaces/srv/SetMode "{mode: 3}"     # 应返回 success: false
+# 参数：非法值应被拒绝
+ros2 param set /param_demo robot_name ""
+ros2 param get /param_demo robot_name                                 # 原值应保留
+# 动作：发送目标后按 Ctrl+C 取消，观察服务端是否停止执行
+ros2 action send_goal --feedback /move_distance my_interfaces/action/MoveDistance "{distance: 5.0}"
+</script>
+<div class="callout warn">
+  <strong>参数名拼错不会报错</strong>
+  <p>参数 YAML 中写成 <code>max_sped: 0.5</code>，节点不会报错，只会继续使用默认值。这是现场「改了参数没生效」的头号原因。测试方法：启动后用 <code>ros2 param get</code> 或冒烟测试（T3.5）断言关键参数的实际值。</p>
+</div>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>直接调用服务回调做状态机测试、同进程服务通信测试：<a href="../testing/02-unit-component.html">T2 单元与组件测试</a>。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 两个节点都创建了名为 <code>/set_mode</code> 的服务端，会怎样？</summary>

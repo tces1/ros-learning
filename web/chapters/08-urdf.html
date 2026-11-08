@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 8 章 URDF / Xacro 机器人描述 · ROS2 中文教材</title>
+<title>第 8 章 URDF / Xacro 机器人描述 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch08" data-root="../">
@@ -357,6 +357,28 @@ ros2 param get /robot_state_publisher robot_description | head
 
 <h2>8.7 从 CAD 导出</h2>
 <p>复杂机器人通常从 CAD 导出 URDF：SolidWorks 有 <code>sw_urdf_exporter</code> 插件，Onshape 可用 <code>onshape-to-robot</code>，Fusion 360 有社区导出脚本。导出后仍建议手动检查坐标系方向（REP-103）、简化碰撞体、核对质量。</p>
+
+<h2>测试视角</h2>
+<p>URDF 是仿真、TF、碰撞检测、运动规划的共同来源。它错了，后面所有测试的基础都是错的。</p>
+<table>
+  <thead><tr><th>检查项</th><th>方法</th><th>后果</th></tr></thead>
+  <tbody>
+    <tr><td>能否正确展开和解析</td><td><code>xacro</code> + <code>check_urdf</code>，放进 CI</td><td>启动失败</td></tr>
+    <tr><td>惯性参数合理</td><td>质量 &gt; 0，惯性矩阵正定、量级合理</td><td>Gazebo 中机器人抖动、飞起、穿地</td></tr>
+    <tr><td>碰撞几何与外形一致</td><td>RViz 中同时显示 visual 和 collision</td><td>规划认为能通过，实际擦碰</td></tr>
+    <tr><td>传感器安装位姿</td><td>与实物测量对比</td><td>仿真测试结论不适用于实机（见 T4.1）</td></tr>
+    <tr><td>关节限位</td><td>与电机、机械限位对比</td><td>规划出超出硬件能力的动作</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y liburdfdom-tools
+xacro $(ros2 pkg prefix my_bot_description)/share/my_bot_description/urdf/my_bot.urdf.xacro > /tmp/my_bot.urdf
+check_urdf /tmp/my_bot.urdf                 # 解析并打印连杆树，出错时返回非 0
+</script>
+<div class="callout tip">
+  <strong>模型与实物要「对账」</strong>
+  <p>实机测试前，用卷尺测量雷达高度、轮距、轮径，与 URDF 对比并记录。仿真中通过、实机失败的问题，很多源于模型与实物不一致（例如低矮障碍物在雷达扫描平面以下，见 T7 自测题）。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 为什么要单独有一个 <code>base_footprint</code>？</summary>

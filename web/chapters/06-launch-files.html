@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 6 章 Launch 系统编排 · ROS2 中文教材</title>
+<title>第 6 章 Launch 系统编排 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch06" data-root="../">
@@ -327,6 +327,29 @@ ros2 launch my_first_nodes demo.launch.py --print       # 只打印将执行的�
 ros2 launch my_first_nodes demo.launch.py --debug       # 输出 launch 系统的详细调试信息
 ls ~/.ros/log/                                          # 每次 launch 的日志目录
 </script>
+
+<h2>测试视角</h2>
+<p>launch 文件是 Python 代码，却很少有人为它写测试。路径拼错、参数名写错、条件写反、某个启动参数组合根本跑不起来，都只能在启动时暴露。</p>
+<table>
+  <thead><tr><th>测试点</th><th>方法</th></tr></thead>
+  <tbody>
+    <tr><td>每个对外的 launch 文件都能启动</td><td>冒烟测试：启动后断言预期节点存在、未崩溃（T3.5）</td></tr>
+    <tr><td>启动参数组合</td><td>对每个布尔参数的两种取值、关键参数的边界值各跑一次</td></tr>
+    <tr><td>启动参数确实传到节点</td><td>启动后读取节点参数，与传入值对比</td></tr>
+    <tr><td>启动顺序依赖</td><td><code>TimerAction</code> 只是延时，不是保证。在负载高的机器上把延时缩短一半，观察是否失败</td></tr>
+    <tr><td>进程退出行为</td><td>杀掉某个节点，观察是否按设计重启（<code>respawn</code>）或关闭整个系统（<code>on_exit</code>）</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch my_first_nodes demo.launch.py --show-args       # 列出所有启动参数及默认值
+ros2 launch my_first_nodes demo.launch.py --print           # 只打印展开后的描述，不真正启动
+ros2 launch my_first_nodes demo.launch.py start_listener:=false robot_name:=bot_test
+ros2 param get /param_demo robot_name                       # 应为 bot_test
+</script>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>用 launch_testing 自动化以上检查：<a href="../testing/03-integration-launch-testing.html">T3 集成测试</a>。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. <code>ros2 launch my_first_nodes demo.launch.py</code> 报 “file 'demo.launch.py' was not found”，最常见原因？</summary>

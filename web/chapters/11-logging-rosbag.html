@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 11 章 日志、调试与 rosbag2 · ROS2 中文教材</title>
+<title>第 11 章 日志、调试与 rosbag2 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch11" data-root="../">
@@ -255,6 +255,31 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml     # 默认端口 8765
   <li><strong>日志说了什么</strong>：rqt_console 过滤 WARN 以上</li>
   <li><strong>能否复现</strong>：录包，离线回放，二分定位</li>
 </ol>
+
+<h2>测试视角</h2>
+<p>日志、bag、诊断是测试工程师的「证据链」。缺陷报告里能附上的数据越完整，问题解决得越快。</p>
+<table>
+  <thead><tr><th>工具</th><th>在测试中的用途</th></tr></thead>
+  <tbody>
+    <tr><td>日志</td><td>测试失败时第一手资料；集成测试中断言关键日志出现（T3）；按节点调高日志级别复现问题</td></tr>
+    <tr><td>rosbag2</td><td>每次实机测试都录包；把现场问题裁剪成最小复现数据；作为回放回归测试的输入（T5）</td></tr>
+    <tr><td>诊断（/diagnostics）</td><td>长稳测试中监控各部件健康状态；故障注入后验证诊断是否正确变为 WARN / ERROR（T6）</td></tr>
+    <tr><td>Foxglove / PlotJuggler</td><td>把日志、话题、TF 放在同一时间轴上，定位问题发生的瞬间</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+# 只把一个节点的日志级别调到 debug，其他节点保持不变
+ros2 run my_first_nodes safety_stop --ros-args --log-level safety_stop:=debug
+ls ~/.ros/log/                       # 每次 launch 的日志目录，提交缺陷时一起打包
+</script>
+<div class="callout warn">
+  <strong>测试时先确认录包真的在录</strong>
+  <p>现场最令人沮丧的事：复现了一个罕见问题，回头发现录包没开或少录了关键话题。测试前检查清单中加入「确认录包运行且包含关键话题」。</p>
+</div>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>录包规范、离线 / 在线回放测试、不变量检查、bag 裁剪：<a href="../testing/05-bag-replay.html">T5 数据回放测试</a>。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 回放 bag 时 SLAM 节点报「extrapolation into the past」，最可能的原因？</summary>

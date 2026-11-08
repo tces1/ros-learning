@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T2 单元与组件测试 · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t02" data-root="../">
+<main class="content">
+
+<h1>T2　单元与组件测试</h1>
+<p class="lead">测试金字塔的底座。本篇在第 10 章的基础上深入：如何把 ROS 节点设计得可测试，如何在测试进程里直接驱动节点回调，如何用性质测试和假对象发现真实缺陷，以及 C++ 侧的 gtest / gmock 和覆盖率。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">测试篇</span><span class="tag">前置：第 4、5、10 章</span></div>
+
+<h2>本篇目标</h2>
+<ul>
+  <li>掌握让 ROS 节点可测试的设计方法：逻辑分离、依赖注入</li>
+  <li>用 pytest 的参数化、夹具（fixture）和 hypothesis 性质测试写高质量单元测试</li>
+  <li>在测试进程中创建 rclpy 节点，直接调用回调或通过真实服务通信做组件测试</li>
+  <li>用 gtest / gmock 测试 C++ 代码，用假对象替代硬件</li>
+  <li>生成 Python 与 C++ 覆盖率报告</li>
+</ul>
+
+<h2>T2.1 单元测试与组件测试的边界</h2>
+<table>
+  <thead><tr><th></th><th>单元测试（L0）</th><th>组件测试（L1）</th></tr></thead>
+  <tbody>
+    <tr><td>被测对象</td><td>纯函数、纯类</td><td>一个 ROS 节点（或一个类 + 它的 ROS 外壳）</td></tr>
+    <tr><td>需要 rclpy.init()</td><td>不需要</td><td>需要</td></tr>
+    <tr><td>通信</td><td>无</td><td>无，或仅在同一进程内</td></tr>
+    <tr><td>依赖</td><td>无</td><td>外部依赖（导航、硬件、其他节点）用假对象替代</td></tr>
+    <tr><td>速度</td><td>毫秒</td><td>几十毫秒到几秒</td></tr>
+    <tr><td>典型断言</td><td>返回值、异常</td><td>回调执行后发布了什么、状态变成了什么、服务返回了什么</td></tr>
+  </tbody>
+</table>
+
+<h2>T2.2 可测试的节点设计</h2>
+<p>决定一个节点好不好测的，是它的结构，而不是测试框架。三个原则：</p>
+<table>
+  <thead><tr><th>原则</th><th>反例（难测）</th><th>正例（好测）</th></tr></thead>
+  <tbody>
+    <tr><td>业务逻辑与 ROS 分离</td><td>在订阅回调里直接写 80 行算法</td><td>算法写成纯函数，回调只负责「取数据 → 调函数 → 发结果」</td></tr>
+    <tr><td>依赖从外部传入</td><td>在构造函数里 <code>BasicNavigator()</code>、打开串口</td><td>构造函数接收 navigator / serial 对象，测试时传入假对象（第 16 章的 <code>PatrolManager(navigator)</code> 就是这样设计的）</td></tr>
+    <tr><td>回调可直接调用</td><td>逻辑写在 lambda 里，测试无法触达</td><td>回调是普通方法（如 <code>on_scan</code>、<code>on_cmd</code>），测试可以直接调用</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>测试人员的话语权</strong>
+  <p>代码评审时，「这段逻辑能不能不启动 ROS 就测试？」是测试工程师最有价值的问题之一。可测试性差的代码往往也是耦合严重、难以维护的代码。</p>
+</div>
+
+<h2>T2.3 pytest 进阶</h2>
+<h3>参数化与边界值</h3>
+<p>第 10 章写过 <code>clamp</code> 和 <code>normalize_angle</code>。用边界值分析把用例补全：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_motion_utils_boundary.py">
+import math
+
+import pytest
+from my_first_nodes.motion_utils import clamp, normalize_angle
+
+
+@pytest.mark.parametrize('value, limit, expected', [
+    (1.0, 1.0, 1.0),          # 恰好等于上限
+    (-1.0, 1.0, -1.0),        # 恰好等于下限
+    (1.0 + 1e-9, 1.0, 1.0),   # 刚超过上限
+    (0.0, 0.0, 0.0),          # 上限为 0
+    (math.inf, 1.0, 1.0),     # 无穷大
+    (-math.inf, 1.0, -1.0),
+], ids=['eq-upper', 'eq-lower', 'just-over', 'zero-limit', 'inf', '-inf'])
+def test_clamp_boundaries(value, limit, expected):
+    assert clamp(value, limit) == expected
+
+
+@pytest.mark.parametrize('angle, expected', [
+    (math.pi, math.pi),        # 区间 (-pi, pi] 包含 pi
+    (-math.pi, math.pi),       # -pi 应映射为 pi
+    (0.0, 0.0),
+    (4 * math.pi + 0.1, 0.1),
+    (-7 * math.pi / 2, math.pi / 2),
+])
+def test_normalize_angle_boundaries(angle, expected):
+    assert normalize_angle(angle) == pytest.approx(expected, abs=1e-9)
+</script>
+<div class="callout warn">
+  <strong>浮点数不要用 == 比较计算结果</strong>
+  <p>计算得到的浮点数用 <code>pytest.approx</code>（或 gtest 的 <code>EXPECT_NEAR</code>），并明确写出容差。角度比较还要注意 π 与 -π 是同一个方向：比较两个角度时，先求差再归一化，再与 0 比较。</p>
+</div>
+
+<h3>性质测试：让工具替你找边界</h3>
+<p>手写用例只能覆盖你想到的情况。性质测试（property-based testing）只描述「对任何输入都应成立的性质」，由 hypothesis 自动生成成百上千个输入，包括 NaN、无穷大、极大值这类人容易忽略的值。</p>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y python3-hypothesis
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_motion_utils_property.py">
+import math
+
+from hypothesis import given, strategies as st
+from my_first_nodes.motion_utils import clamp, normalize_angle
+
+finite = st.floats(allow_nan=False, allow_infinity=False, min_value=-1e6, max_value=1e6)
+
+
+@given(finite)
+def test_normalize_angle_in_range(a):
+    r = normalize_angle(a)
+    assert -math.pi < r <= math.pi + 1e-12
+
+
+@given(finite)
+def test_normalize_angle_same_direction(a):
+    r = normalize_angle(a)
+    k = (a - r) / (2 * math.pi)           # 结果与原角度应相差 2π 的整数倍
+    assert abs(k - round(k)) < 1e-6
+
+
+@given(st.floats(), st.floats(min_value=0.0, max_value=10.0))
+def test_clamp_never_exceeds_limit(value, limit):
+    out = clamp(value, limit)
+    assert -limit <= out <= limit
+
+
+@given(st.floats(), st.floats(min_value=0.0, max_value=10.0))
+def test_clamp_never_turns_nan_into_motion(value, limit):
+    out = clamp(value, limit)
+    if math.isnan(value):
+        assert out == 0.0, f'clamp(nan, {limit}) 返回了 {out}'
+</script>
+<p>运行后，最后一个测试会失败，hypothesis 会把失败输入「缩小」到最简形式：</p>
+<script type="text/plain" class="code" data-lang="text">
+Falsifying example: test_clamp_never_turns_nan_into_motion(value=nan, limit=1.0)
+AssertionError: clamp(nan, 1.0) 返回了 1.0
+</script>
+<div class="callout danger">
+  <strong>这是一个真实的安全缺陷</strong>
+  <p>Python 的 <code>min(1.0, nan)</code> 返回 1.0（因为任何与 NaN 的比较都是 False）。所以上游算法一旦算出 NaN 速度，<code>clamp</code> 会把它变成<strong>满速</strong>。正确的做法是对 NaN 返回 0 或抛出异常：</p>
+</div>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/motion_utils.py（修复后的 clamp）">
+def clamp(value: float, limit: float) -> float:
+    """把 value 限制在 [-limit, limit]；NaN 视为 0，避免把无效指令变成运动。"""
+    if limit < 0:
+        raise ValueError('limit must be non-negative')
+    if math.isnan(value):
+        return 0.0
+    return max(-limit, min(limit, value))
+</script>
+
+<h3>夹具（fixture）与 conftest.py</h3>
+<p>多个测试文件都需要 rclpy 环境时，把初始化放进 <code>conftest.py</code>，pytest 会自动加载：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/conftest.py">
+import pytest
+import rclpy
+
+
+@pytest.fixture
+def ros():
+    """每个测试独立初始化 / 关闭 rclpy，互不影响。"""
+    rclpy.init()
+    yield
+    rclpy.shutdown()
+</script>
+
+<h2>T2.4 组件测试：直接驱动节点回调</h2>
+<h3>测试服务回调（第 5 章 mode_server）</h3>
+<p>服务回调就是普通方法，可以直接构造请求和响应对象调用它，不需要真的发起服务调用：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_mode_server.py">
+import pytest
+from my_first_nodes.mode_server import ModeServer
+from my_interfaces.srv import SetMode
+
+
+@pytest.fixture
+def server(ros):
+    node = ModeServer()
+    yield node
+    node.destroy_node()
+
+
+def call(server, mode):
+    return server.handle_set_mode(SetMode.Request(mode=mode), SetMode.Response())
+
+
+def test_initial_mode_is_idle(server):
+    assert server.mode == 0
+
+
+@pytest.mark.parametrize('sequence, final_mode', [
+    ([1], 1),
+    ([1, 2], 2),
+    ([1, 1], 1),          # 重复切换到同一模式
+    ([2, 0], 0),
+])
+def test_valid_transitions(server, sequence, final_mode):
+    for m in sequence:
+        assert call(server, m).success
+    assert server.mode == final_mode
+
+
+def test_unknown_mode_rejected_and_state_unchanged(server):
+    call(server, 1)
+    res = call(server, 9)
+    assert not res.success
+    assert '未知模式' in res.message
+    assert server.mode == 1               # 失败的请求不能改变状态
+
+
+def test_out_of_range_value_rejected_by_message_type():
+    with pytest.raises(AssertionError):   # rclpy 在赋值时检查 uint8 范围
+        SetMode.Request(mode=300)
+</script>
+<div class="callout note">
+  <strong>状态机测试要点</strong>
+  <p>对有状态的节点，除了「合法转移结果正确」，一定要测「非法请求不改变状态」和「重复请求是幂等的」。这两类问题在 Code Review 中最容易被漏掉。</p>
+</div>
+
+<h3>测试订阅回调（第 15 章 safety_stop）</h3>
+<p>安全停车节点是最值得测试的节点之一。我们用一个辅助函数构造 LaserScan，把发布函数替换成列表来捕获输出：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_safety_stop.py">
+import math
+
+import pytest
+from geometry_msgs.msg import Twist
+from rclpy.parameter import Parameter
+from sensor_msgs.msg import LaserScan
+from my_first_nodes.safety_stop import SafetyStop
+
+
+def make_scan(obstacles=(), default=5.0, n=360):
+    """构造 360° 激光；obstacles 为 [(角度_度, 距离_m), ...]。"""
+    scan = LaserScan()
+    scan.angle_min = -math.pi
+    scan.angle_increment = 2 * math.pi / n
+    scan.angle_max = scan.angle_min + scan.angle_increment * (n - 1)
+    scan.range_min, scan.range_max = 0.12, 10.0
+    ranges = [default] * n
+    for deg, dist in obstacles:
+        i = round((math.radians(deg) - scan.angle_min) / scan.angle_increment) % n
+        ranges[i] = dist
+    scan.ranges = [float(r) for r in ranges]
+    return scan
+
+
+def forward(v=0.3):
+    cmd = Twist()
+    cmd.linear.x = v
+    return cmd
+
+
+@pytest.fixture
+def node(ros, monkeypatch):
+    n = SafetyStop()
+    n.published = []
+    monkeypatch.setattr(n.pub, 'publish', n.published.append)
+    yield n
+    n.destroy_node()
+
+
+def test_obstacle_ahead_blocks_forward(node):
+    node.on_scan(make_scan([(0, 0.3)]))
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == 0.0
+
+
+def test_obstacle_behind_allows_forward(node):
+    node.on_scan(make_scan([(180, 0.2)]))
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == pytest.approx(0.3)
+
+
+def test_reverse_allowed_when_blocked(node):
+    node.on_scan(make_scan([(0, 0.2)]))
+    node.on_cmd(forward(-0.2))
+    assert node.published[-1].linear.x == pytest.approx(-0.2)
+
+
+@pytest.mark.parametrize('deg, blocked', [(29, True), (31, False), (-29, True), (-31, False)])
+def test_sector_boundary(node, deg, blocked):
+    node.on_scan(make_scan([(deg, 0.3)]))
+    node.on_cmd(forward())
+    assert (node.published[-1].linear.x == 0.0) == blocked
+
+
+def test_parameter_change_takes_effect(node):
+    node.set_parameters([Parameter('stop_distance', value=0.6)])
+    node.on_scan(make_scan([(0, 0.5)]))
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == 0.0
+
+
+@pytest.mark.parametrize('bad', [math.nan, math.inf, 0.0, 0.05])
+def test_invalid_ranges_ignored(node, bad):
+    node.on_scan(make_scan([(0, bad)]))   # 无效或低于 range_min 的读数不应触发停车
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == pytest.approx(0.3)
+
+
+@pytest.mark.xfail(strict=True, reason='DEFECT-001：从未收到雷达数据时仍放行前进')
+def test_blocks_forward_when_no_scan_received(node):
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == 0.0
+</script>
+<p>最后一个用例揭示了一个设计缺陷：节点启动后还没收到任何雷达数据时，<code>min_front</code> 初始值是 <code>inf</code>，前进指令被直接放行。同理，雷达中途断开时，节点会一直使用最后一帧数据。这类缺陷叫<strong>失效时放行（fail-open）</strong>，安全相关模块必须设计成<strong>失效时安全（fail-safe）</strong>。</p>
+<div class="callout tip">
+  <strong>用 xfail(strict=True) 跟踪已知缺陷</strong>
+  <p>缺陷还没修好时，把用例标记为 <code>xfail</code> 并写上缺陷编号，CI 保持绿色，缺陷也不会被遗忘。<code>strict=True</code> 表示：一旦缺陷被修复、用例意外通过，测试反而会失败，提醒你去掉标记，把它转为正式的回归用例。</p>
+</div>
+<p>修复方法是记录最后一帧雷达的时间，数据缺失或过期时禁止前进：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/safety_stop.py（修复：数据超时即停车）">
+from rclpy.duration import Duration
+# ... 其余导入不变
+
+
+class SafetyStop(Node):
+    def __init__(self):
+        super().__init__('safety_stop')
+        self.declare_parameter('stop_distance', 0.4)
+        self.declare_parameter('half_angle_deg', 30.0)
+        self.declare_parameter('scan_timeout', 0.5)       # 秒
+        self.min_front = math.inf
+        self.last_scan_time = None
+        # ... 订阅与发布不变
+
+    def on_scan(self, scan: LaserScan):
+        # ... 计算 self.min_front 不变
+        self.last_scan_time = self.get_clock().now()
+
+    def scan_fresh(self):
+        if self.last_scan_time is None:
+            return False
+        timeout = Duration(seconds=self.get_parameter('scan_timeout').value)
+        return self.get_clock().now() - self.last_scan_time < timeout
+
+    def on_cmd(self, cmd: Twist):
+        stop_d = self.get_parameter('stop_distance').value
+        if cmd.linear.x > 0.0 and (not self.scan_fresh() or self.min_front < stop_d):
+            cmd.linear.x = 0.0
+            self.get_logger().warn('前方有障碍或雷达数据缺失，禁止前进', throttle_duration_sec=1.0)
+        self.pub.publish(cmd)
+</script>
+<p>修复后，去掉 xfail 标记，并补充「数据过期」用例：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_safety_stop.py（追加）">
+from rclpy.duration import Duration
+
+
+def test_blocks_forward_when_no_scan_received(node):
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == 0.0
+
+
+def test_blocks_forward_when_scan_stale(node):
+    node.on_scan(make_scan())                                   # 前方空旷
+    node.last_scan_time = node.get_clock().now() - Duration(seconds=2.0)
+    node.on_cmd(forward())
+    assert node.published[-1].linear.x == 0.0
+</script>
+
+<h3>通过真实服务通信测试（同进程）</h3>
+<p>直接调用回调测不到「服务名、类型、注册」是否正确。把服务端和一个测试客户端放进同一个执行器，就能在一个进程内走完整的 ROS 通信路径：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_mode_server_comm.py">
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from my_first_nodes.mode_server import ModeServer
+from my_interfaces.srv import SetMode
+
+
+def test_set_mode_over_ros(ros):
+    server = ModeServer()
+    client_node = rclpy.create_node('test_mode_client')
+    client = client_node.create_client(SetMode, 'set_mode')
+    executor = SingleThreadedExecutor()
+    executor.add_node(server)
+    executor.add_node(client_node)
+    try:
+        assert client.wait_for_service(timeout_sec=5.0), 'set_mode 服务未出现'
+        future = client.call_async(SetMode.Request(mode=2))
+        executor.spin_until_future_complete(future, timeout_sec=5.0)
+        assert future.done(), '服务调用超时'
+        assert future.result().success
+        assert server.mode == 2
+    finally:
+        executor.shutdown()
+        server.destroy_node()
+        client_node.destroy_node()
+</script>
+<div class="callout warn">
+  <strong>测试之间的通信串扰</strong>
+  <p>同一网络中其他人运行的 <code>set_mode</code> 服务也可能被你的测试客户端发现。在 CI 和共享开发机上，为测试设置独立的 <code>ROS_DOMAIN_ID</code>，或设置 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>（Jazzy；Humble 用 <code>ROS_LOCALHOST_ONLY=1</code>）。T3 会详细讨论测试隔离。</p>
+</div>
+
+<h2>T2.5 假对象：替代导航、硬件与时间</h2>
+<table>
+  <thead><tr><th>类型</th><th>含义</th><th>机器人测试中的例子</th></tr></thead>
+  <tbody>
+    <tr><td>Stub（桩）</td><td>返回固定值</td><td>电压传感器永远返回 24.0 V</td></tr>
+    <tr><td>Fake（假实现）</td><td>有简化的真实行为</td><td>假导航器：调用 3 次后报告到达（T8 中用于测试巡逻管理器）</td></tr>
+    <tr><td>Mock（模拟对象）</td><td>预设期望并验证调用</td><td>验证「电量低时必须调用一次 stop_motors()」</td></tr>
+    <tr><td>Spy（间谍）</td><td>记录调用供事后检查</td><td>上面用列表替换 <code>publish</code> 捕获输出</td></tr>
+  </tbody>
+</table>
+
+<h3>C++：gtest + gmock 替代硬件</h3>
+<p>把硬件访问抽象成接口，业务类依赖接口，测试中传入 mock：</p>
+<script type="text/plain" class="code" data-lang="cpp" data-file="cpp_pubsub/include/cpp_pubsub/battery_monitor.hpp">
+#pragma once
+#include <cmath>
+
+namespace cpp_pubsub
+{
+
+class BatterySensor
+{
+public:
+  virtual ~BatterySensor() = default;
+  virtual double voltage() = 0;
+};
+
+enum class BatteryLevel { kOk, kLow, kCritical, kSensorError };
+
+class BatteryMonitor
+{
+public:
+  BatteryMonitor(BatterySensor & sensor, double low_v, double critical_v)
+  : sensor_(sensor), low_v_(low_v), critical_v_(critical_v) {}
+
+  BatteryLevel check()
+  {
+    const double v = sensor_.voltage();
+    if (!std::isfinite(v) || v <= 0.0) {return BatteryLevel::kSensorError;}
+    if (v < critical_v_) {return BatteryLevel::kCritical;}
+    if (v < low_v_) {return BatteryLevel::kLow;}
+    return BatteryLevel::kOk;
+  }
+
+private:
+  BatterySensor & sensor_;
+  double low_v_;
+  double critical_v_;
+};
+
+}  // namespace cpp_pubsub
+</script>
+<script type="text/plain" class="code" data-lang="cpp" data-file="cpp_pubsub/test/test_battery_monitor.cpp">
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include <limits>
+
+#include "cpp_pubsub/battery_monitor.hpp"
+
+using cpp_pubsub::BatteryLevel;
+using cpp_pubsub::BatteryMonitor;
+using ::testing::Return;
+
+class MockBatterySensor : public cpp_pubsub::BatterySensor
+{
+public:
+  MOCK_METHOD(double, voltage, (), (override));
+};
+
+class BatteryMonitorTest : public ::testing::Test
+{
+protected:
+  MockBatterySensor sensor;
+  BatteryMonitor monitor{sensor, 23.0, 22.0};
+};
+
+TEST_F(BatteryMonitorTest, NormalVoltageIsOk) {
+  EXPECT_CALL(sensor, voltage()).WillOnce(Return(25.2));
+  EXPECT_EQ(monitor.check(), BatteryLevel::kOk);
+}
+
+TEST_F(BatteryMonitorTest, ThresholdsAreExclusive) {
+  EXPECT_CALL(sensor, voltage()).WillOnce(Return(23.0)).WillOnce(Return(22.0));
+  EXPECT_EQ(monitor.check(), BatteryLevel::kOk);    // 等于 low 阈值不算低电量
+  EXPECT_EQ(monitor.check(), BatteryLevel::kLow);   // 等于 critical 阈值不算严重
+}
+
+TEST_F(BatteryMonitorTest, BelowCriticalIsCritical) {
+  EXPECT_CALL(sensor, voltage()).WillOnce(Return(21.5));
+  EXPECT_EQ(monitor.check(), BatteryLevel::kCritical);
+}
+
+TEST_F(BatteryMonitorTest, InvalidReadingIsSensorError) {
+  EXPECT_CALL(sensor, voltage())
+  .WillOnce(Return(std::numeric_limits<double>::quiet_NaN()))
+  .WillOnce(Return(0.0))
+  .WillOnce(Return(-1.0));
+  EXPECT_EQ(monitor.check(), BatteryLevel::kSensorError);
+  EXPECT_EQ(monitor.check(), BatteryLevel::kSensorError);
+  EXPECT_EQ(monitor.check(), BatteryLevel::kSensorError);
+}
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="cpp_pubsub/CMakeLists.txt（if(BUILD_TESTING) 内追加）">
+  find_package(ament_cmake_gmock REQUIRED)
+  ament_add_gmock(test_battery_monitor test/test_battery_monitor.cpp)
+  target_include_directories(test_battery_monitor PRIVATE include)
+</script>
+<script type="text/plain" class="code" data-lang="xml" data-file="cpp_pubsub/package.xml（追加）">
+<test_depend>ament_cmake_gmock</test_depend>
+</script>
+
+<h3>C++：在测试中创建 rclcpp 节点</h3>
+<p>要测试 C++ 节点类，先把节点从 <code>main()</code> 所在文件中拆出来，编译成库，测试和可执行文件都链接这个库。测试中的套路如下：</p>
+<script type="text/plain" class="code" data-lang="cpp" data-file="cpp_pubsub/test/test_pubsub_roundtrip.cpp">
+#include <gtest/gtest.h>
+#include <chrono>
+#include <memory>
+
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
+
+using namespace std::chrono_literals;
+
+class RclcppTest : public ::testing::Test
+{
+protected:
+  static void SetUpTestSuite() {rclcpp::init(0, nullptr);}
+  static void TearDownTestSuite() {rclcpp::shutdown();}
+};
+
+TEST_F(RclcppTest, MessageRoundTrip) {
+  auto node = std::make_shared<rclcpp::Node>("roundtrip_test");
+  std::string received;
+  auto sub = node->create_subscription<std_msgs::msg::String>(
+    "test_chatter", 10, [&](const std_msgs::msg::String & m) {received = m.data;});
+  auto pub = node->create_publisher<std_msgs::msg::String>("test_chatter", 10);
+
+  rclcpp::executors::SingleThreadedExecutor exec;
+  exec.add_node(node);
+  std_msgs::msg::String msg;
+  msg.data = "ping";
+
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (received.empty() && std::chrono::steady_clock::now() < deadline) {
+    pub->publish(msg);                  // 发现需要时间，循环发布直到收到
+    exec.spin_some(100ms);
+  }
+  EXPECT_EQ(received, "ping");
+}
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="cpp_pubsub/CMakeLists.txt（if(BUILD_TESTING) 内追加）">
+  ament_add_gtest(test_pubsub_roundtrip test/test_pubsub_roundtrip.cpp)
+  ament_target_dependencies(test_pubsub_roundtrip rclcpp std_msgs)
+</script>
+<div class="callout warn">
+  <strong>不要用 sleep 等待</strong>
+  <p>「发布后 sleep(1) 再检查」在开发机上能过，在负载高的 CI 机器上就会随机失败。正确做法是「循环等待条件成立，同时设置总超时」，就像上面的 <code>deadline</code> 循环。这是消除不稳定测试（flaky test）的第一原则。</p>
+</div>
+
+<h2>T2.6 覆盖率</h2>
+<h3>Python</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y python3-pytest-cov
+cd ~/ros2_ws/src/my_first_nodes
+python3 -m pytest test/ --cov=my_first_nodes --cov-report=term-missing --cov-report=html
+# 终端里显示每个文件未覆盖的行号；htmlcov/index.html 是可浏览的报告
+</script>
+<p>运行前需要先 <code>source ~/ros2_ws/install/setup.bash</code>，这样测试才能导入 <code>my_interfaces</code> 等依赖。</p>
+<h3>C++</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y lcov python3-colcon-lcov-result
+cd ~/ros2_ws
+colcon build --packages-select cpp_pubsub \
+  --cmake-args -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_C_FLAGS="--coverage"
+colcon lcov-result --initial                       # 记录基线（未执行的代码也会计入）
+colcon test --packages-select cpp_pubsub
+colcon lcov-result --packages-select cpp_pubsub    # 汇总结果，报告在 lcov/ 目录
+</script>
+<div class="callout note">
+  <strong>覆盖率只是下限</strong>
+  <p>100% 行覆盖率的 <code>clamp</code> 依然有 NaN 缺陷。覆盖率告诉你「哪些代码完全没被测过」，不能告诉你「测过的代码是否正确」。在机器人项目中，安全相关模块（急停、限速、碰撞检测）应追求更高的分支覆盖率，并配合性质测试与边界值测试。</p>
+</div>
+
+<h2>T2.7 用例命名与组织</h2>
+<ul>
+  <li>用例名描述「条件 + 期望」：<code>test_obstacle_ahead_blocks_forward</code> 比 <code>test_safety_1</code> 好得多，失败时一眼就知道哪里出了问题</li>
+  <li>一个用例只验证一个行为；断言失败信息写清楚实际值（如上面 <code>f'clamp(nan, {limit}) 返回了 {out}'</code>）</li>
+  <li>测试文件与被测模块一一对应：<code>safety_stop.py</code> ↔ <code>test_safety_stop.py</code></li>
+  <li>每个缺陷修复都附带一个回归用例，用例名或注释中写缺陷编号</li>
+  <li>用 <code>pytest -m "not slow"</code> 这类标记把慢用例与快用例分开，提交时只跑快的</li>
+</ul>
+
+<h2>动手练习</h2>
+<ol>
+  <li>为第 16 章 <code>route_utils.route_length</code> 写性质测试：结果非负；在路线中间插入一个点不会让总长变短（三角不等式）。</li>
+  <li>为第 5 章的参数节点 <code>param_demo</code> 写组件测试：用 <code>set_parameters</code> 设置非法值，验证被拒绝且原值不变。</li>
+  <li>给 <code>safety_stop</code> 的 <code>half_angle_deg</code> 参数做边界值测试（0°、180°、负值），记录你认为应当修复的问题。</li>
+  <li>生成 <code>my_first_nodes</code> 的覆盖率报告，找出未覆盖的分支并补测试。</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么 <code>clamp(nan, 1.0)</code> 会返回 1.0？</summary>
+<div>与 NaN 的任何比较结果都是 False。<code>min(1.0, nan)</code> 先取 1.0 作为当前最小值，再比较 <code>nan &lt; 1.0</code> 为 False，于是保留 1.0；<code>max(-1.0, 1.0)</code> 返回 1.0。结果是无效输入变成了满速输出。</div></details>
+<details class="quiz"><summary>2. 「失效时放行」和「失效时安全」分别是什么意思？</summary>
+<div>失效时放行（fail-open）：依赖的数据或组件失效时，系统按「一切正常」处理，例如没有雷达数据时放行前进。失效时安全（fail-safe）：失效时进入安全状态，例如雷达超时就禁止前进。安全相关功能必须是后者。</div></details>
+<details class="quiz"><summary>3. 直接调用回调的组件测试和走真实通信的组件测试，各自能发现什么问题？</summary>
+<div>直接调用回调：速度快、确定性高，能发现逻辑、状态机、参数处理问题。走真实通信：能发现服务 / 话题名、类型、QoS、注册方式等「接线」问题。两者互补，前者数量多，后者少量覆盖关键接口即可。</div></details>
+<details class="quiz"><summary>4. <code>xfail(strict=True)</code> 的作用是什么？</summary>
+<div>把已知缺陷的用例标记为「预期失败」，CI 不会因此变红；strict=True 时如果用例意外通过（缺陷被修复），测试会报失败，提醒移除标记，把它变成正式的回归测试。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能说出可测试节点设计的三个原则</li>
+  <li>写过参数化用例和 hypothesis 性质测试，并亲眼看到 clamp 的 NaN 缺陷</li>
+  <li>为 safety_stop 写了组件测试，理解并修复了失效时放行缺陷</li>
+  <li>写过一个 gmock 测试</li>
+  <li>生成过 Python 和 C++ 覆盖率报告</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

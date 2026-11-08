@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T4 仿真与场景测试 · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t04" data-root="../">
+<main class="content">
+
+<h1>T4　仿真与场景测试</h1>
+<p class="lead">单个节点都没问题，不代表整机能完成任务。仿真场景测试把完整软件栈（Gazebo + Nav2 + 业务节点）放进一个个精心设计的场景中，自动判定成败，并重复运行统计成功率。它是导航、规划类功能回归测试的主力，也是机器人测试开发岗位最核心的技能之一。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 4 小时</span><span class="tag">测试篇</span><span class="tag">前置：第 9、13 章、T3</span></div>
+
+<h2>本篇目标</h2>
+<ul>
+  <li>理解仿真测试能测什么、不能测什么</li>
+  <li>以无界面模式运行 Gazebo，适配 CI</li>
+  <li>用 YAML 描述场景（起点、障碍物、目标、判定准则），批量运行</li>
+  <li>编写自动判定的场景执行器：到达、超时、到点误差、安全距离、停滞</li>
+  <li>用成功率和置信区间报告结果，识别不稳定的场景</li>
+</ul>
+
+<h2>T4.1 仿真测试的能力边界</h2>
+<table>
+  <thead><tr><th>仿真擅长</th><th>仿真不擅长</th></tr></thead>
+  <tbody>
+    <tr><td>导航、规划、行为逻辑的回归（参数改了有没有变差）</td><td>真实传感器噪声、反光、玻璃、黑色物体、阳光干扰</td></tr>
+    <tr><td>大量重复运行、统计成功率</td><td>轮子打滑、地面不平、电机饱和等动力学细节</td></tr>
+    <tr><td>危险场景（贴近障碍、急停、悬崖）的安全验证</td><td>硬件时序、驱动、总线通信问题</td></tr>
+    <tr><td>构造现场难以复现的场景（特定障碍布局、故障注入）</td><td>计算资源受限下的实时性（仿真机器性能通常远好于机器人）</td></tr>
+    <tr><td>在 CI 中无人值守运行</td><td>人与机器人的真实交互</td></tr>
+  </tbody>
+</table>
+<div class="callout note">
+  <strong>仿真与现实的差距（sim-to-real gap）</strong>
+  <p>仿真通过不代表实机通过，但<strong>仿真失败基本意味着实机也会失败</strong>。所以仿真测试最大的价值是「便宜地拦住明显的回归」，把昂贵的实机时间留给仿真无法覆盖的问题。</p>
+</div>
+
+<h2>T4.2 无界面运行 Gazebo</h2>
+<p>CI 服务器没有显示器。Gazebo 可以只运行服务端（<code>-s</code>），并用 <code>--headless-rendering</code> 让需要渲染的传感器（如 gpu_lidar、相机）在无显示环境下工作。给第 9 章的 <code>sim.launch.py</code> 加一个 <code>headless</code> 参数：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_gazebo/launch/sim.launch.py（修改部分）">
+from launch.substitutions import PythonExpression
+# ... 其余导入不变
+
+    headless = LaunchConfiguration('headless')
+    gz_flags = PythonExpression(
+        ["'-r -s --headless-rendering ' if '", headless, "' == 'true' else '-r '"])
+
+    gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('ros_gz_sim'), 'launch', 'gz_sim.launch.py'])),
+        launch_arguments={'gz_args': [gz_flags, world]}.items(),
+    )
+
+    # return 列表中追加：
+    #   DeclareLaunchArgument('headless', default_value='false'),
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch my_bot_gazebo sim.launch.py headless:=true rviz:=false
+ros2 topic hz /scan          # 没有窗口，但雷达数据照常发布
+</script>
+<div class="callout warn">
+  <strong>没有 GPU 的 CI 机器</strong>
+  <p>gpu_lidar 和相机依赖渲染引擎。在没有 GPU 的容器中通常需要 Mesa 软件渲染（安装 <code>libegl1</code>、<code>mesa-utils</code> 等），速度会明显变慢，仿真实时因子（RTF）可能低于 1。判定准则中的时间要用<strong>仿真时间</strong>计算，不能用墙钟时间。</p>
+</div>
+
+<h2>T4.3 测试包结构</h2>
+<pre class="diagram">
+my_bot/my_bot_tests/                   ament_python
+├── package.xml
+├── setup.py
+├── my_bot_tests/
+│   ├── scenario_runner.py             场景执行器：发目标、监控、判定、写结果
+│   └── summarize_results.py           汇总：成功率、置信区间、JUnit XML
+├── launch/
+│   └── scenario.launch.py             仿真 + Nav2 + 障碍物 + 执行器
+├── scenarios/                         场景库，每个文件一个场景
+│   ├── basic_goal.yaml
+│   ├── unmapped_box.yaml
+│   ├── narrow_gap.yaml
+│   └── unreachable_goal.yaml
+└── scripts/
+    └── run_scenarios.sh               批量运行
+</pre>
+
+<h2>T4.4 用 YAML 描述场景</h2>
+<p>场景文件只描述「测什么」，不包含代码。测试工程师新增场景时只需写 YAML：</p>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_tests/scenarios/unmapped_box.yaml">
+name: unmapped_box
+description: 去往目标的直线路径上有一个地图中不存在的箱子，机器人应绕行到达
+tags: [obstacle, replanning]
+start: [0.0, 0.0, 0.0]                 # x, y, yaw（需与仿真中的出生位置一致）
+obstacles:
+  - {name: box1, x: 1.3, y: 0.0, size: [0.4, 0.4, 0.5]}
+goals:
+  - {pose: [2.5, 0.0, 0.0], timeout: 60.0}
+expect: success                        # success：应到达；failure：应拒绝或安全放弃
+criteria:
+  position_tolerance: 0.30             # m
+  yaw_tolerance: 0.50                  # rad
+  min_scan_range: 0.20                 # 全程雷达最近读数不得小于此值（m）
+  max_stall: 15.0                      # 未完成时速度接近 0 的最长持续时间（s）
+required_success_rate: 0.9             # 批量运行时的准入成功率
+</script>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_tests/scenarios/basic_goal.yaml">
+name: basic_goal
+description: 空旷房间中的多目标点导航（基线场景，任何失败都是严重回归）
+tags: [smoke]
+start: [0.0, 0.0, 0.0]
+obstacles: []
+goals:
+  - {pose: [2.5, 0.0, 0.0], timeout: 45.0}
+  - {pose: [2.5, -2.5, -1.57], timeout: 45.0}
+  - {pose: [0.0, 0.0, 3.14], timeout: 60.0}
+expect: success
+criteria: {position_tolerance: 0.25, yaw_tolerance: 0.4, min_scan_range: 0.20, max_stall: 10.0}
+required_success_rate: 1.0
+</script>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_tests/scenarios/narrow_gap.yaml">
+name: narrow_gap
+description: 两个箱子之间留出 0.6 m 通道，机器人应从中穿过而不擦碰
+tags: [obstacle, narrow]
+start: [0.0, 0.0, 0.0]
+obstacles:
+  - {name: left_box,  x: 1.3, y:  0.55, size: [0.3, 0.5, 0.5]}
+  - {name: right_box, x: 1.3, y: -0.55, size: [0.3, 0.5, 0.5]}
+goals:
+  - {pose: [2.5, 0.0, 0.0], timeout: 90.0}
+expect: success
+criteria: {position_tolerance: 0.30, yaw_tolerance: 0.6, min_scan_range: 0.15, max_stall: 20.0}
+required_success_rate: 0.8
+</script>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_tests/scenarios/unreachable_goal.yaml">
+name: unreachable_goal
+description: 目标被箱子完全围住，导航应在限定时间内报告失败，且全程不碰撞
+tags: [negative, safety]
+start: [0.0, 0.0, 0.0]
+obstacles:
+  - {name: wall_n, x: 2.5, y:  0.45, size: [1.0, 0.1, 0.5]}
+  - {name: wall_s, x: 2.5, y: -0.45, size: [1.0, 0.1, 0.5]}
+  - {name: wall_e, x: 2.95, y: 0.0, size: [0.1, 0.8, 0.5]}
+  - {name: wall_w, x: 2.05, y: 0.0, size: [0.1, 0.8, 0.5]}
+goals:
+  - {pose: [2.5, 0.0, 0.0], timeout: 120.0}
+expect: failure
+criteria: {min_scan_range: 0.15, max_stall: 120.0}
+required_success_rate: 1.0
+</script>
+<div class="callout tip">
+  <strong>负向场景同样重要</strong>
+  <p><code>unreachable_goal</code> 期望的是「失败」：机器人应该在合理时间内放弃并报告，而不是无限尝试，更不能为了到达而撞开障碍物。只测「能到达」的测试集会漏掉大量真实问题。坐标请根据你自己的 <code>room.sdf</code> 调整，确保障碍物不与墙重叠。</p>
+</div>
+
+<h3>场景库的分类设计</h3>
+<table>
+  <thead><tr><th>类别</th><th>示例</th><th>主要风险</th></tr></thead>
+  <tbody>
+    <tr><td>基线</td><td>空旷环境多点导航</td><td>任何失败都说明有严重回归</td></tr>
+    <tr><td>静态障碍</td><td>地图中没有的箱子、椅子</td><td>局部规划、重规划</td></tr>
+    <tr><td>狭窄通道</td><td>门洞、货架间通道（宽度从「刚好能过」到「刚好过不去」）</td><td>代价地图膨胀、控制器参数</td></tr>
+    <tr><td>动态障碍</td><td>横穿的行人、迎面而来的机器人</td><td>碰撞、急停、震荡</td></tr>
+    <tr><td>不可达 / 非法目标</td><td>目标在障碍物内、在地图外</td><td>无限重试、超时处理</td></tr>
+    <tr><td>定位挑战</td><td>初始位姿错误（机器人「被绑架」）、长走廊</td><td>AMCL 发散、错误定位</td></tr>
+    <tr><td>故障注入</td><td>运行中停止雷达桥接、里程计漂移</td><td>失效时是否安全停车</td></tr>
+  </tbody>
+</table>
+
+<h2>T4.5 场景执行器</h2>
+<p>执行器是一个普通的 Python 程序：读取场景、设置初始位姿、依次发送目标、在等待期间持续监控，最后对照判定准则给出结论，写出 JSON 结果，并以退出码表示成败。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/scenario_runner.py">
+import json
+import math
+import sys
+import time
+
+import rclpy
+import yaml
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from nav_msgs.msg import Odometry
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.utilities import remove_ros_args
+from sensor_msgs.msg import LaserScan
+
+
+def yaw_from_quat(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def angle_diff(a, b):
+    return math.atan2(math.sin(a - b), math.cos(a - b))
+
+
+def make_pose(nav, x, y, yaw):
+    p = PoseStamped()
+    p.header.frame_id = 'map'
+    p.header.stamp = nav.get_clock().now().to_msg()
+    p.pose.position.x, p.pose.position.y = float(x), float(y)
+    p.pose.orientation.z, p.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
+    return p
+
+
+class Monitor:
+    """挂在 navigator 节点上的订阅；navigator 等待任务时会 spin 自身，回调随之执行。"""
+
+    def __init__(self, nav):
+        self.nav = nav
+        self.pose = None                    # (x, y, yaw)，来自 AMCL
+        self.speed = 0.0
+        self.distance = 0.0
+        self._last_xy = None
+        self.reset()
+        nav.create_subscription(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
+        nav.create_subscription(Odometry, 'odom', self.on_odom, 10)
+        nav.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self.on_pose, 10)
+
+    def reset(self):
+        self.min_scan = math.inf
+        self.max_stall = 0.0
+        self._stall_start = None
+
+    def on_scan(self, scan):
+        valid = [r for r in scan.ranges if math.isfinite(r) and r > scan.range_min]
+        if valid:
+            self.min_scan = min(self.min_scan, min(valid))
+
+    def on_odom(self, odom):
+        v = odom.twist.twist
+        self.speed = math.hypot(v.linear.x, v.linear.y) + abs(v.angular.z) * 0.1
+        xy = (odom.pose.pose.position.x, odom.pose.pose.position.y)
+        if self._last_xy:
+            self.distance += math.dist(xy, self._last_xy)
+        self._last_xy = xy
+
+    def on_pose(self, msg):
+        p = msg.pose.pose
+        self.pose = (p.position.x, p.position.y, yaw_from_quat(p.orientation))
+
+    def update_stall(self, now_s):
+        if self.speed < 0.01:
+            if self._stall_start is None:
+                self._stall_start = now_s
+            self.max_stall = max(self.max_stall, now_s - self._stall_start)
+        else:
+            self._stall_start = None
+
+
+def run_goal(nav, mon, goal, criteria, expect):
+    mon.reset()
+    timeout = goal.get('timeout', 60.0)
+    target = goal['pose']
+    t0 = nav.get_clock().now()
+    elapsed = 0.0
+    nav.goToPose(make_pose(nav, *target))
+    cancelled_by_timeout = False
+    while not nav.isTaskComplete():
+        elapsed = (nav.get_clock().now() - t0).nanoseconds / 1e9     # 仿真时间
+        mon.update_stall(elapsed)
+        if elapsed > timeout and not cancelled_by_timeout:
+            nav.cancelTask()
+            cancelled_by_timeout = True
+    result = nav.getResult()
+
+    rec = {
+        'goal': target, 'result': result.name, 'elapsed_s': round(elapsed, 2),
+        'min_scan_range': round(mon.min_scan, 3), 'max_stall_s': round(mon.max_stall, 2),
+        'distance_m': round(mon.distance, 2), 'checks': {},
+    }
+    checks = rec['checks']
+    checks['min_scan_range'] = mon.min_scan >= criteria.get('min_scan_range', 0.0)
+    checks['max_stall'] = mon.max_stall <= criteria.get('max_stall', math.inf)
+    if expect == 'success':
+        checks['succeeded'] = result == TaskResult.SUCCEEDED
+        checks['within_timeout'] = not cancelled_by_timeout
+        if mon.pose:
+            pos_err = math.dist(mon.pose[:2], target[:2])
+            yaw_err = abs(angle_diff(mon.pose[2], target[2]))
+            rec['position_error_m'] = round(pos_err, 3)
+            rec['yaw_error_rad'] = round(yaw_err, 3)
+            checks['position'] = pos_err <= criteria.get('position_tolerance', 0.3)
+            checks['yaw'] = yaw_err <= criteria.get('yaw_tolerance', 0.5)
+        else:
+            checks['position'] = False
+    else:
+        checks['rejected'] = result != TaskResult.SUCCEEDED
+        checks['gave_up_in_time'] = not cancelled_by_timeout
+    rec['passed'] = all(checks.values())
+    return rec
+
+
+def main():
+    rclpy.init()
+    args = remove_ros_args(sys.argv)
+    scenario_file, result_file = args[1], args[2]
+    with open(scenario_file) as f:
+        sc = yaml.safe_load(f)
+
+    nav = BasicNavigator()
+    mon = Monitor(nav)
+    wall_start = time.time()
+    report = {'scenario': sc['name'], 'expect': sc.get('expect', 'success'), 'goals': []}
+    try:
+        nav.setInitialPose(make_pose(nav, *sc.get('start', [0.0, 0.0, 0.0])))
+        nav.waitUntilNav2Active()
+        for goal in sc['goals']:
+            rec = run_goal(nav, mon, goal, sc.get('criteria', {}), report['expect'])
+            report['goals'].append(rec)
+            nav.get_logger().info(f'目标 {goal["pose"]}: {"通过" if rec["passed"] else "失败"} {rec}')
+            if not rec['passed']:
+                break                       # 一个目标失败后，后续目标的结果没有意义
+        report['passed'] = bool(report['goals']) and all(g['passed'] for g in report['goals'])
+    except Exception as e:                  # 执行器自身异常也要留下结果
+        report['passed'] = False
+        report['error'] = repr(e)
+    finally:
+        report['wall_time_s'] = round(time.time() - wall_start, 1)
+        with open(result_file, 'w') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        nav.destroy_node()
+        rclpy.try_shutdown()
+    sys.exit(0 if report['passed'] else 1)
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<div class="callout note">
+  <strong>判定数据从哪里来</strong>
+  <p>这里用 AMCL 的估计位姿判断「到点误差」，它本身也可能有误差。更严格的做法是从 Gazebo 获取<strong>真值位姿</strong>（例如在模型上加 PosePublisher 插件并桥接到 ROS），同时报告「定位误差 = AMCL − 真值」。测试预言的数据源本身是否可信，是设计测试时必须考虑的问题。</p>
+</div>
+
+<h2>T4.6 场景启动文件</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/launch/scenario.launch.py">
+import os
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import (DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription,
+                            OpaqueFunction, RegisterEventHandler, TimerAction)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+BOX_SDF = """<sdf version="1.9"><model name="{name}"><static>true</static><link name="link">
+<collision name="c"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry></collision>
+<visual name="v"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry></visual>
+</link></model></sdf>"""
+
+
+def resolve_scenario(name):
+    if name.endswith('.yaml') and os.path.isfile(name):
+        return name
+    return os.path.join(get_package_share_directory('my_bot_tests'), 'scenarios', name + '.yaml')
+
+
+def launch_setup(context):
+    scenario_file = resolve_scenario(LaunchConfiguration('scenario').perform(context))
+    result_file = LaunchConfiguration('result').perform(context)
+    with open(scenario_file) as f:
+        sc = yaml.safe_load(f)
+
+    obstacles = []
+    for ob in sc.get('obstacles', []):
+        sx, sy, sz = ob['size']
+        obstacles.append(Node(
+            package='ros_gz_sim', executable='create', output='log',
+            arguments=['-name', ob['name'],
+                       '-string', BOX_SDF.format(name=ob['name'], sx=sx, sy=sy, sz=sz),
+                       '-x', str(ob['x']), '-y', str(ob['y']), '-z', str(sz / 2.0)]))
+
+    runner = Node(
+        package='my_bot_tests', executable='scenario_runner', output='screen',
+        arguments=[scenario_file, result_file],
+        parameters=[{'use_sim_time': True}])
+
+    return [
+        TimerAction(period=4.0, actions=obstacles),
+        TimerAction(period=12.0, actions=[runner]),
+        RegisterEventHandler(OnProcessExit(
+            target_action=runner,
+            on_exit=[EmitEvent(event=Shutdown(reason='scenario finished'))])),
+    ]
+
+
+def generate_launch_description():
+    nav_pkg = FindPackageShare('my_bot_navigation')
+
+    sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution(
+            [FindPackageShare('my_bot_gazebo'), 'launch', 'sim.launch.py'])),
+        launch_arguments={'headless': LaunchConfiguration('headless'), 'rviz': 'false'}.items())
+
+    nav2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution(
+            [FindPackageShare('nav2_bringup'), 'launch', 'bringup_launch.py'])),
+        launch_arguments={
+            'map': PathJoinSubstitution([nav_pkg, 'maps', 'room.yaml']),
+            'params_file': PathJoinSubstitution([nav_pkg, 'config', 'nav2_params.yaml']),
+            'use_sim_time': 'true',
+        }.items())
+
+    return LaunchDescription([
+        DeclareLaunchArgument('scenario', description='场景名（scenarios/ 下的文件名）或 YAML 路径'),
+        DeclareLaunchArgument('result', default_value='/tmp/scenario_result.json'),
+        DeclareLaunchArgument('headless', default_value='true'),
+        sim,
+        TimerAction(period=5.0, actions=[nav2]),
+        OpaqueFunction(function=launch_setup),
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/setup.py">
+from glob import glob
+
+from setuptools import find_packages, setup
+
+package_name = 'my_bot_tests'
+
+setup(
+    name=package_name,
+    version='0.1.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+        ('share/' + package_name + '/scenarios', glob('scenarios/*.yaml')),
+        ('share/' + package_name + '/scripts', glob('scripts/*.sh')),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='you',
+    maintainer_email='you@example.com',
+    description='Scenario, replay and performance tests for my_bot',
+    license='Apache-2.0',
+    entry_points={
+        'console_scripts': [
+            'scenario_runner = my_bot_tests.scenario_runner:main',
+            'summarize_results = my_bot_tests.summarize_results:main',
+        ],
+    },
+)
+</script>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_tests/package.xml（依赖部分）">
+<buildtool_depend>ament_python</buildtool_depend>
+<exec_depend>rclpy</exec_depend>
+<exec_depend>nav2_simple_commander</exec_depend>
+<exec_depend>nav2_bringup</exec_depend>
+<exec_depend>ros_gz_sim</exec_depend>
+<exec_depend>my_bot_gazebo</exec_depend>
+<exec_depend>my_bot_navigation</exec_depend>
+<exec_depend>python3-yaml</exec_depend>
+<test_depend>python3-pytest</test_depend>
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws && colcon build --packages-select my_bot_tests --symlink-install && source install/setup.bash
+ros2 launch my_bot_tests scenario.launch.py scenario:=unmapped_box result:=/tmp/r.json
+cat /tmp/r.json
+
+# 调试场景时打开界面观察
+ros2 launch my_bot_tests scenario.launch.py scenario:=narrow_gap headless:=false
+</script>
+
+<h2>T4.7 批量运行与统计</h2>
+<script type="text/plain" class="code" data-lang="bash" data-file="my_bot_tests/scripts/run_scenarios.sh">
+#!/usr/bin/env bash
+# 用法：run_scenarios.sh <每个场景重复次数> [场景名 ...]（不写场景名则运行全部）
+set -u
+REPEAT=${1:-5}
+shift || true
+SCEN_DIR="$(ros2 pkg prefix my_bot_tests)/share/my_bot_tests/scenarios"
+if [ $# -gt 0 ]; then
+  SCENARIOS="$*"
+else
+  SCENARIOS=$(ls "$SCEN_DIR"/*.yaml | xargs -n1 basename | sed 's/\.yaml$//')
+fi
+OUT="$PWD/results/$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUT"
+
+for s in $SCENARIOS; do
+  for i in $(seq 1 "$REPEAT"); do
+    echo "=== $s 第 $i/$REPEAT 次 ==="
+    timeout 900 ros2 launch my_bot_tests scenario.launch.py \
+      scenario:="$s" result:="$OUT/${s}__$i.json" headless:=true > "$OUT/${s}__$i.log" 2>&1
+    if [ ! -f "$OUT/${s}__$i.json" ]; then        # 崩溃或超时：没有结果文件也要记为失败
+      echo "{\"scenario\": \"$s\", \"passed\": false, \"error\": \"no result (crash or timeout)\"}" \
+        > "$OUT/${s}__$i.json"
+    fi
+    pkill -f "gz sim" 2>/dev/null; sleep 3         # 清理可能残留的仿真进程
+  done
+done
+ros2 run my_bot_tests summarize_results "$OUT"
+</script>
+<p>汇总脚本计算每个场景的成功率，并用 Wilson 区间给出 95% 置信下限：样本少时，「5 次全过」的置信下限只有约 57%，提醒你不要过度相信小样本结论。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/summarize_results.py">
+import glob
+import json
+import math
+import os
+import sys
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+
+def wilson_lower(successes, n, z=1.96):
+    """成功率 95% 置信区间的下限（Wilson score interval）。"""
+    if n == 0:
+        return 0.0
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (centre - margin) / denom
+
+
+def required_rate(name):
+    path = os.path.join(get_package_share_directory('my_bot_tests'), 'scenarios', name + '.yaml')
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f).get('required_success_rate', 0.9)
+    except OSError:
+        return 0.9
+
+
+def main():
+    out_dir = sys.argv[1]
+    runs = defaultdict(list)
+    for path in sorted(glob.glob(os.path.join(out_dir, '*.json'))):
+        with open(path) as f:
+            r = json.load(f)
+        runs[r['scenario']].append((os.path.basename(path), r))
+
+    suite = ET.Element('testsuite', name='scenario_tests')
+    failed_any = False
+    print(f'{"场景":<20}{"通过/总数":>10}{"成功率":>9}{"95%下限":>9}{"要求":>7}  结论')
+    for name, items in sorted(runs.items()):
+        n = len(items)
+        ok = sum(1 for _, r in items if r.get('passed'))
+        rate, low, need = ok / n, wilson_lower(ok, n), required_rate(name)
+        verdict = '通过' if rate >= need else '失败'
+        failed_any |= verdict == '失败'
+        print(f'{name:<20}{ok:>5}/{n:<4}{rate:>9.0%}{low:>9.0%}{need:>7.0%}  {verdict}')
+
+        case = ET.SubElement(suite, 'testcase', classname='scenarios', name=name)
+        if verdict == '失败':
+            fails = [f'{fname}: {r.get("error") or (r.get("goals") or [{}])[-1].get("checks")}'
+                     for fname, r in items if not r.get('passed')]
+            ET.SubElement(case, 'failure', message=f'成功率 {rate:.0%} < 要求 {need:.0%}').text = \
+                '\n'.join(fails)
+
+    ET.ElementTree(suite).write(os.path.join(out_dir, 'junit.xml'), encoding='utf-8',
+                                xml_declaration=True)
+    sys.exit(1 if failed_any else 0)
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<script type="text/plain" class="code" data-lang="text" data-file="输出示例">
+场景                    通过/总数      成功率    95%下限     要求  结论
+basic_goal              10/10      100%      72%    100%  通过
+narrow_gap               7/10       70%      40%     80%  失败
+unmapped_box            10/10      100%      72%     90%  通过
+unreachable_goal        10/10      100%      72%    100%  通过
+</script>
+
+<h2>T4.8 不稳定场景的来源与对策</h2>
+<table>
+  <thead><tr><th>来源</th><th>表现</th><th>对策</th></tr></thead>
+  <tbody>
+    <tr><td>启动竞态</td><td>偶发「Nav2 未激活」「TF 不存在」</td><td>用 <code>waitUntilNav2Active</code> 等条件等待，而不是只靠 TimerAction 延时</td></tr>
+    <tr><td>实时因子波动</td><td>CI 上超时，本地通过</td><td>所有时间判定用仿真时间；记录 RTF；CI 机器资源固定</td></tr>
+    <tr><td>物理与传感器随机性</td><td>同一场景时过时不过</td><td>这是真实特性，不是测试的错：用成功率和准入阈值表达</td></tr>
+    <tr><td>残留进程</td><td>第二次运行开始失败</td><td>每次运行后清理 gz 进程；CI 中每批使用新容器</td></tr>
+    <tr><td>场景本身不合理</td><td>障碍物与墙重叠、目标点在膨胀区内</td><td>新场景先在界面模式下人工确认一次再入库</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>不要通过「重跑直到通过」让 CI 变绿</strong>
+  <p>机器人测试中「偶发失败」往往正是现场会出现的问题。正确做法是把成功率作为指标长期跟踪：一个场景从 95% 降到 80%，比任何单次失败都更能说明某次修改引入了回归。</p>
+</div>
+
+<h2>动手练习</h2>
+<ol>
+  <li>按本篇搭建 <code>my_bot_tests</code>，让 <code>basic_goal</code> 和 <code>unmapped_box</code> 各运行 10 次，输出汇总表。</li>
+  <li>新增一个「通道宽度」系列场景：0.8、0.6、0.5、0.45 m，找出你的参数下能稳定通过的最小宽度（这就是对代价地图膨胀参数的边界测试）。</li>
+  <li>把 <code>nav2_params.yaml</code> 中的 <code>inflation_radius</code> 调大一倍，重跑场景库，观察哪些场景成功率下降。体会「参数修改的回归测试」。</li>
+  <li>为执行器加一个判定项：任务过程中 <code>/cmd_vel</code> 线速度从未超过 <code>max_vel_x</code> 参数。</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么判定超时要用仿真时间？</summary>
+<div>CI 机器性能不同、负载不同，仿真实时因子可能小于 1。用墙钟时间判定会把「机器慢」误判为「机器人慢」。机器人在仿真世界中花了多少时间，才是要评估的指标。</div></details>
+<details class="quiz"><summary>2. 一个场景跑了 5 次全部通过，能说它的成功率达到 95% 吗？</summary>
+<div>不能。5 次全过时，成功率 95% 置信区间的下限约为 57%。要以较高置信度说明成功率 ≥ 95%，需要几十次以上的无失败运行（按「三分之一规则」，0 次失败时 95% 上限的失败率约为 3/n，需要 n ≈ 60）。</div></details>
+<details class="quiz"><summary>3. 为什么场景库中要有期望「失败」的场景？</summary>
+<div>真实环境中一定会出现无法完成的任务。系统在这种情况下的行为（是否及时放弃、是否报告、是否安全）同样是需求的一部分，必须测试。只测正向场景，会漏掉无限重试、卡死、强行通过等严重问题。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能以无界面模式运行仿真，并确认传感器数据正常</li>
+  <li>写出至少 4 个场景，包含一个负向场景</li>
+  <li>场景执行器能输出 JSON 结果和正确的退出码</li>
+  <li>批量运行后得到带置信下限的汇总表和 junit.xml</li>
+  <li>能解释仿真测试的能力边界</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

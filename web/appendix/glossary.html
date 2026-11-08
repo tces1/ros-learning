@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>附录 D 术语表 · ROS2 中文教材</title>
+<title>附录 D 术语表 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="glossary" data-root="../">
@@ -116,6 +116,30 @@
     <tr><td>Point Cloud 点云</td><td>三维点的集合</td></tr>
     <tr><td>Voxel 体素</td><td>三维栅格单元，用于降采样或三维代价地图</td></tr>
     <tr><td>rosbag / MCAP</td><td>数据录制工具 / 推荐的存储格式（第 11 章）</td></tr>
+  </tbody>
+</table>
+
+<h2>D.7 机器人测试</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>Test Oracle 测试预言</td><td>判断测试通过或失败的依据，如容差、不变量、基准（T1、T5）</td></tr>
+    <tr><td>SIL / HIL</td><td>软件在环 / 硬件在环：真实软件 + 仿真环境 / 真实控制硬件 + 仿真或台架负载（T1、T7）</td></tr>
+    <tr><td>Component Test 组件测试</td><td>在测试进程内创建节点，直接驱动回调或用假依赖替代外部系统（T2）</td></tr>
+    <tr><td>Fake / Stub / Mock</td><td>假实现 / 固定返回值的桩 / 预设并验证调用的模拟对象（T2）</td></tr>
+    <tr><td>Property-based Testing 性质测试</td><td>描述对任意输入都成立的性质，由工具自动生成输入，如 hypothesis（T2）</td></tr>
+    <tr><td>launch_testing</td><td>ROS2 官方集成测试框架，用 launch 启动被测进程并断言其行为（T3）</td></tr>
+    <tr><td>Flaky Test 不稳定测试</td><td>代码不变、结果时过时不过的测试，常因 sleep、发现时序、隔离不足引起（T3）</td></tr>
+    <tr><td>Scenario Test 场景测试</td><td>在仿真中运行完整系统，按场景定义自动判定成败（T4）</td></tr>
+    <tr><td>RTF 实时因子</td><td>仿真时间流逝速度与真实时间之比（T4）</td></tr>
+    <tr><td>Golden Master 基准对比</td><td>与人工确认过的历史输出逐项比较的回归测试（T5）</td></tr>
+    <tr><td>Invariant 不变量</td><td>任何时候都必须成立的规则，如「前方过近时不得前进」（T5）</td></tr>
+    <tr><td>Soak Test 长稳测试</td><td>长时间连续运行，发现泄漏、累积误差、偶发崩溃（T6）</td></tr>
+    <tr><td>Fault Injection 故障注入</td><td>主动制造进程崩溃、传感器中断、网络劣化等故障，验证系统反应（T6）</td></tr>
+    <tr><td>Fail-safe / Fail-open</td><td>失效时进入安全状态 / 失效时按正常放行（T2）</td></tr>
+    <tr><td>MDBF / MTBF</td><td>平均故障间隔里程 / 时间（T1、T7）</td></tr>
+    <tr><td>Pairwise 成对组合测试</td><td>保证任意两个因素的每对取值至少出现一次的用例组合方法（T7）</td></tr>
+    <tr><td>Entry / Exit Criteria 准入 / 准出条件</td><td>开始测试 / 允许发布前必须满足的条件（T7）</td></tr>
   </tbody>
 </table>
 

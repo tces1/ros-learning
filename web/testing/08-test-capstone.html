@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T8 综合项目：为巡逻小车建测试体系 · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t08" data-root="../">
+<main class="content">
+
+<h1>T8　综合项目：为巡逻小车建测试体系</h1>
+<p class="lead">把 T1–T7 的方法用在第 16 章的巡逻小车上：制定测试策略，补齐各层自动化测试，用假导航器发现巡逻管理器的并发缺陷，搭建 CI 流水线，最后产出测试报告和缺陷报告。完成后，你将拥有一个可以在面试中完整讲述的机器人测试项目。</p>
+<div class="meta-bar"><span class="tag">建议用时 1–2 周</span><span class="tag">测试篇</span><span class="tag">前置：第 16 章、T1–T7</span></div>
+
+<h2>T8.1 项目目标与交付物</h2>
+<table>
+  <thead><tr><th>编号</th><th>交付物</th><th>对应</th></tr></thead>
+  <tbody>
+    <tr><td>D1</td><td>测试策略文档：分层、工具、运行频率、准入准出标准</td><td>T1、T7</td></tr>
+    <tr><td>D2</td><td><code>route_utils</code> 单元测试 + 性质测试</td><td>T2</td></tr>
+    <tr><td>D3</td><td><code>patrol_manager</code> 组件测试（假导航器），发现并修复并发缺陷</td><td>T2</td></tr>
+    <tr><td>D4</td><td>巡逻整机场景测试：启动、跑满两圈、停止后 2 s 内停车</td><td>T4</td></tr>
+    <tr><td>D5</td><td>巡逻过程录包 + 不变量检查（限速、安全距离）</td><td>T5</td></tr>
+    <tr><td>D6</td><td>2 小时长稳测试数据与分析</td><td>T6</td></tr>
+    <tr><td>D7</td><td>CI 流水线：提交时跑快速测试，每晚跑场景测试</td><td>T3、T4</td></tr>
+    <tr><td>D8</td><td>测试报告 + 至少 2 份缺陷报告</td><td>T7</td></tr>
+  </tbody>
+</table>
+
+<h2>T8.2 测试策略</h2>
+<table>
+  <thead><tr><th>层级</th><th>被测对象</th><th>测试位置</th><th>运行时机</th><th>耗时</th></tr></thead>
+  <tbody>
+    <tr><td>L0 单元</td><td><code>route_utils</code>、<code>scan_utils</code>、<code>motion_utils</code></td><td>各包 <code>test/</code></td><td>每次提交</td><td>&lt; 10 s</td></tr>
+    <tr><td>L1 组件</td><td><code>PatrolManager</code>（假导航器）、<code>SafetyStop</code></td><td>各包 <code>test/</code></td><td>每次提交</td><td>&lt; 30 s</td></tr>
+    <tr><td>L2 集成</td><td>safety_stop 黑盒、launch 冒烟</td><td>各包 <code>test/</code>（launch_testing）</td><td>每次提交</td><td>&lt; 2 min</td></tr>
+    <tr><td>L3 场景</td><td>Nav2 场景库、巡逻整机</td><td><code>my_bot_tests</code></td><td>每晚 / 手动</td><td>1–3 h</td></tr>
+    <tr><td>L4 回放</td><td>scan_utils 基准、安全不变量</td><td><code>my_bot_tests</code></td><td>每晚</td><td>&lt; 30 min</td></tr>
+    <tr><td>L6 性能 / 长稳</td><td>反应时间、资源、内存斜率</td><td><code>my_bot_tests</code></td><td>每周 / 发布前</td><td>2–24 h</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>策略文档的核心是「取舍」</strong>
+  <p>不需要每层都追求完美。写清楚每层负责发现哪类问题、为什么这样安排运行频率、哪些风险目前没有覆盖（例如「真实雷达反光问题依赖实机测试，当前没有回放数据」）。面试中能讲清这些取舍，比展示测试数量更有说服力。</p>
+</div>
+
+<h2>T8.3 测试包的完整结构</h2>
+<pre class="diagram">
+my_bot/
+├── my_bot_apps/
+│   ├── my_bot_apps/patrol_manager.py
+│   ├── my_bot_apps/route_utils.py
+│   └── test/
+│       ├── conftest.py
+│       ├── fake_navigator.py              假导航器
+│       ├── test_route_utils.py            第 16 章 + 本篇补充
+│       └── test_patrol_manager.py         组件测试
+└── my_bot_tests/
+    ├── my_bot_tests/
+    │   ├── scenario_runner.py  summarize_results.py           T4
+    │   ├── bag_tools.py                                       T5
+    │   ├── latency_probe.py  reaction_time_test.py            T6
+    │   ├── resource_monitor.py  analyze_soak.py  perf_gate.py T6
+    │   └── patrol_check.py                                    本篇
+    ├── launch/  scenario.launch.py  patrol_scenario.launch.py
+    ├── scenarios/  *.yaml
+    ├── scripts/  run_scenarios.sh  record_run.sh
+    ├── replay_tests/  test_safety_replay.py
+    └── test/  test_scan_golden.py  replay_manifest.yaml  golden/
+</pre>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/setup.py（entry_points 完整版）">
+    entry_points={
+        'console_scripts': [
+            'scenario_runner = my_bot_tests.scenario_runner:main',
+            'summarize_results = my_bot_tests.summarize_results:main',
+            'latency_probe = my_bot_tests.latency_probe:main',
+            'reaction_time_test = my_bot_tests.reaction_time_test:main',
+            'resource_monitor = my_bot_tests.resource_monitor:main',
+            'analyze_soak = my_bot_tests.analyze_soak:main',
+            'perf_gate = my_bot_tests.perf_gate:main',
+            'patrol_check = my_bot_tests.patrol_check:main',
+        ],
+    },
+</script>
+
+<h2>T8.4 单元测试补充</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/test/test_route_utils.py（追加）">
+import math
+
+import pytest
+from hypothesis import given, strategies as st
+from my_bot_apps.route_utils import parse_waypoints, route_length
+
+coord = st.floats(min_value=-50, max_value=50, allow_nan=False)
+point = st.tuples(coord, coord, st.floats(min_value=-math.pi, max_value=math.pi))
+
+
+@given(st.lists(point, max_size=20))
+def test_route_length_non_negative(points):
+    assert route_length(points) >= 0.0
+
+
+@given(point, point, point)
+def test_inserting_point_never_shortens_route(a, b, c):
+    assert route_length([a, b, c]) >= route_length([a, c]) - 1e-9
+
+
+def test_parse_waypoints_non_numeric():      # 故意写错的用例，见下文说明
+    with pytest.raises(TypeError):
+        parse_waypoints(['a', 'b', 'c', 1])
+
+
+@pytest.mark.xfail(strict=True, reason='DEFECT-023：空航点列表被接受，巡逻会空转')
+def test_parse_waypoints_rejects_empty():
+    with pytest.raises(ValueError):
+        parse_waypoints([])
+</script>
+<p><code>test_parse_waypoints_non_numeric</code> 会失败：<code>len(['a','b','c',1]) % 3</code> 不为 0，函数抛出的是 <code>ValueError</code> 而不是 <code>TypeError</code>。这说明测试用例本身也会写错——测试失败时，先判断是被测代码错了还是测试错了。这里应把用例改成 6 个元素（如 <code>['a', 'b', 'c', 1, 2, 3]</code>），再观察 <code>parse_waypoints</code> 对非数字是否有校验（没有校验——参数类型由 ROS 参数系统保证为 double 数组，可以接受）。</p>
+
+<h2>T8.5 组件测试：用假导航器测试巡逻管理器</h2>
+<h3>为可测试性做的小改动</h3>
+<p>为了在测试中传入参数，让 <code>PatrolManager</code> 把额外的关键字参数转交给 <code>Node</code>：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/my_bot_apps/patrol_manager.py（构造函数）">
+class PatrolManager(Node):
+    def __init__(self, navigator: BasicNavigator, **kwargs):
+        super().__init__('patrol_manager', **kwargs)    # 测试中可传 parameter_overrides
+        # ... 其余不变
+</script>
+<h3>假导航器</h3>
+<p>假导航器实现巡逻管理器用到的 <code>BasicNavigator</code> 接口子集，并记录调用情况。它还统计「同时有几个线程在等待任务完成」，用来发现并发问题：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/test/fake_navigator.py">
+import threading
+import time
+
+from nav2_simple_commander.robot_navigator import TaskResult
+from rclpy.clock import Clock
+
+
+class FakeFeedback:
+    def __init__(self, current_waypoint):
+        self.current_waypoint = current_waypoint
+
+
+class FakeNavigator:
+    """每个任务在 isTaskComplete() 被调用 steps 次后结束，结果为 result。"""
+
+    def __init__(self, steps=20, result=TaskResult.SUCCEEDED, step_time=0.01):
+        self.steps, self.result, self.step_time = steps, result, step_time
+        self.lock = threading.Lock()
+        self.tasks = []                  # 每次 followWaypoints 收到的航点数
+        self.cancel_calls = 0
+        self.max_concurrent = 0          # 同时在等待任务的线程数最大值
+        self._waiting = set()
+        self._remaining = 0
+        self._cancelled = False
+        self._clock = Clock()
+
+    def get_clock(self):
+        return self._clock
+
+    def followWaypoints(self, poses):
+        with self.lock:
+            self.tasks.append(len(poses))
+            self._remaining = self.steps
+            self._cancelled = False
+
+    def isTaskComplete(self):
+        me = threading.get_ident()
+        with self.lock:
+            self._waiting.add(me)
+            self.max_concurrent = max(self.max_concurrent, len(self._waiting))
+        time.sleep(self.step_time)
+        with self.lock:
+            self._waiting.discard(me)
+            if self._cancelled:
+                return True
+            self._remaining -= 1
+            return self._remaining <= 0
+
+    def getFeedback(self):
+        done = max(0, self.steps - self._remaining)
+        return FakeFeedback(min(2, done * 3 // max(self.steps, 1)))     # 按进度报告第 0~2 个航点
+
+    def cancelTask(self):
+        with self.lock:
+            self.cancel_calls += 1
+            self._cancelled = True
+
+    def getResult(self):
+        return TaskResult.CANCELED if self._cancelled else self.result
+</script>
+<h3>测试用例</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/test/conftest.py">
+import pytest
+import rclpy
+
+
+@pytest.fixture
+def ros():
+    rclpy.init()
+    yield
+    rclpy.shutdown()
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/test/test_patrol_manager.py">
+import time
+
+import pytest
+from nav2_simple_commander.robot_navigator import TaskResult
+from rclpy.parameter import Parameter
+from std_srvs.srv import Trigger
+
+from fake_navigator import FakeNavigator
+from my_bot_apps.patrol_manager import PatrolManager
+from my_bot_interfaces.msg import RobotStatus
+
+WAYPOINTS = [1.0, 0.0, 0.0, 1.0, 1.0, 1.57, 0.0, 1.0, 3.14]
+
+
+def wait_until(cond, timeout=3.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@pytest.fixture
+def make_manager(ros):
+    created = []
+
+    def factory(nav, loop=True):
+        m = PatrolManager(nav, parameter_overrides=[
+            Parameter('waypoints', value=WAYPOINTS), Parameter('loop', value=loop)])
+        created.append(m)
+        return m
+
+    yield factory
+    for m in created:
+        m.running.clear()
+        time.sleep(0.1)                      # 让巡逻线程退出
+        m.destroy_node()
+
+
+def call(handler):
+    return handler(Trigger.Request(), Trigger.Response())
+
+
+def test_initial_state(make_manager):
+    m = make_manager(FakeNavigator())
+    assert m.status.state == RobotStatus.STATE_IDLE
+    assert m.status.total_waypoints == 3
+
+
+def test_start_sends_all_waypoints(make_manager):
+    nav = FakeNavigator()
+    m = make_manager(nav)
+    assert call(m.on_start).success
+    assert wait_until(lambda: m.status.state == RobotStatus.STATE_PATROLLING)
+    assert wait_until(lambda: len(nav.tasks) >= 1)
+    assert nav.tasks[0] == 3
+
+
+def test_second_start_rejected(make_manager):
+    m = make_manager(FakeNavigator())
+    call(m.on_start)
+    res = call(m.on_start)
+    assert not res.success
+
+
+def test_loop_runs_multiple_laps(make_manager):
+    nav = FakeNavigator(steps=5)
+    m = make_manager(nav)
+    call(m.on_start)
+    assert wait_until(lambda: m.status.lap >= 3), f'lap={m.status.lap}'
+
+
+def test_no_loop_stops_after_one_lap(make_manager):
+    nav = FakeNavigator(steps=5)
+    m = make_manager(nav, loop=False)
+    call(m.on_start)
+    assert wait_until(lambda: m.status.state == RobotStatus.STATE_IDLE and not m.running.is_set())
+    assert len(nav.tasks) == 1 and m.status.lap == 1
+
+
+def test_stop_cancels_and_returns_idle(make_manager):
+    nav = FakeNavigator(steps=1000)               # 足够长，保证停止时任务仍在进行
+    m = make_manager(nav)
+    call(m.on_start)
+    assert wait_until(lambda: len(nav.tasks) == 1)
+    assert call(m.on_stop).success
+    assert wait_until(lambda: m.status.state == RobotStatus.STATE_IDLE)
+    assert nav.cancel_calls == 1
+    assert m.status.state != RobotStatus.STATE_FAILED   # 主动停止不应被当成失败
+
+
+def test_navigation_failure_reported(make_manager):
+    nav = FakeNavigator(steps=3, result=TaskResult.FAILED)
+    m = make_manager(nav)
+    call(m.on_start)
+    assert wait_until(lambda: m.status.state == RobotStatus.STATE_FAILED)
+    assert '失败' in m.status.message
+    assert wait_until(lambda: not m.running.is_set())
+
+
+@pytest.mark.xfail(strict=True, reason='DEFECT-022：stop 后立即 start 会产生两个巡逻线程')
+def test_rapid_stop_start_runs_single_patrol(make_manager):
+    nav = FakeNavigator(steps=50)
+    m = make_manager(nav)
+    call(m.on_start)
+    assert wait_until(lambda: len(nav.tasks) == 1)
+    call(m.on_stop)
+    call(m.on_start)                               # 旧线程还没来得及退出
+    time.sleep(0.5)
+    assert nav.max_concurrent == 1, f'{nav.max_concurrent} 个线程同时在控制导航'
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws && colcon build --packages-select my_bot_apps --symlink-install && source install/setup.bash
+cd src/my_bot/my_bot_apps && python3 -m pytest test/ -v
+</script>
+
+<h3>DEFECT-022 的成因与修复</h3>
+<pre class="diagram">
+ 时间 ─────────────────────────────────────────────────────────────────►
+ 巡逻线程 A： followWaypoints ─ isTaskComplete … isTaskComplete … (继续导航，从未取消)
+ 服务回调：            stop: running.clear()   start: running 未置位 → running.set()，启动线程 B
+ 巡逻线程 B：                                     followWaypoints ─ isTaskComplete …
+                                    ▲
+                      线程 A 在两次检查之间错过了 running 被清除的窗口，
+                      看到 running 又被置位，于是认为「仍在巡逻」，不会取消任务
+</pre>
+<p>结果是两个线程同时调用同一个 <code>BasicNavigator</code>：互相覆盖目标、圈数被加两次、状态混乱。在真实系统中表现为「机器人偶尔在两个航点之间来回摆动」，极难通过现场观察定位。组件测试 + 假导航器让它在 0.5 秒内稳定复现。</p>
+<p>修复方法：用线程对象本身判断是否仍在巡逻，而不是只看标志位：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/my_bot_apps/patrol_manager.py（修复）">
+    def __init__(self, navigator: BasicNavigator, **kwargs):
+        # ... 原有内容
+        self.worker = None
+
+    def on_start(self, request, response):
+        if self.worker is not None and self.worker.is_alive():
+            response.success, response.message = False, '已在巡逻中或正在停止，请稍后再试'
+        else:
+            self.running.set()
+            self.worker = threading.Thread(target=self.patrol_loop, daemon=True)
+            self.worker.start()
+            response.success, response.message = True, '开始巡逻'
+        return response
+</script>
+<p>修复后，去掉 xfail 标记，该用例转为正式回归用例。同时补一个用例：stop 后等待线程退出，再 start 应成功。</p>
+<div class="callout note">
+  <strong>测试中还发现的规格问题</strong>
+  <p>写用例时会遇到几个「代码这样做，但不知道是否正确」的行为：失败后重新 start，<code>lap</code> 不清零，<code>message</code> 仍保留上次的失败信息；巡逻中节点重启，进度全部丢失。这些不是明确的缺陷，而是需求未定义。把它们整理成问题清单交给产品确认，是测试工程师的重要产出。</p>
+</div>
+
+<h2>T8.6 巡逻整机场景测试</h2>
+<p>检查器通过服务启动巡逻，监视 <code>/robot_status</code>，跑满指定圈数后调用停止，并测量停车时间：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/patrol_check.py">
+"""用法：patrol_check <结果 JSON> [圈数=2] [超时秒数=900]"""
+import json
+import math
+import sys
+
+import rclpy
+from my_bot_interfaces.msg import RobotStatus
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.utilities import remove_ros_args
+from std_srvs.srv import Trigger
+
+
+class PatrolCheck(Node):
+    def __init__(self):
+        super().__init__('patrol_check')
+        self.status = None
+        self.speed = 0.0
+        self.failed_seen = False
+        self.create_subscription(RobotStatus, 'robot_status', self.on_status, 10)
+        self.create_subscription(Odometry, 'odom', self.on_odom, 10)
+        self.start_cli = self.create_client(Trigger, 'patrol/start')
+        self.stop_cli = self.create_client(Trigger, 'patrol/stop')
+
+    def on_status(self, msg):
+        self.status = msg
+        self.failed_seen |= msg.state == RobotStatus.STATE_FAILED
+
+    def on_odom(self, msg):
+        t = msg.twist.twist
+        self.speed = math.hypot(t.linear.x, t.linear.y) + abs(t.angular.z) * 0.1
+
+    def now_s(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def call(self, client):
+        if not client.wait_for_service(timeout_sec=120.0):
+            return None
+        future = client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        return future.result()
+
+    def spin_until(self, cond, timeout_s):
+        end = self.now_s() + timeout_s
+        while rclpy.ok() and self.now_s() < end:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if cond():
+                return True
+        return False
+
+
+def main():
+    rclpy.init()
+    args = remove_ros_args(sys.argv)
+    out = args[1]
+    laps = int(args[2]) if len(args) > 2 else 2
+    timeout = float(args[3]) if len(args) > 3 else 900.0
+    n = PatrolCheck()
+    checks, metrics = {}, {}
+
+    res = n.call(n.start_cli)
+    checks['start_accepted'] = bool(res and res.success)
+    if checks['start_accepted']:
+        t0 = n.now_s()
+        done = n.spin_until(lambda: n.failed_seen or (n.status and n.status.lap > laps), timeout)
+        metrics['patrol_time_s'] = round(n.now_s() - t0, 1)
+        checks['laps_completed'] = done and not n.failed_seen
+        checks['never_failed'] = not n.failed_seen
+
+        res = n.call(n.stop_cli)
+        checks['stop_accepted'] = bool(res and res.success)
+        t_stop = n.now_s()
+        stopped = n.spin_until(lambda: n.speed < 0.01, 10.0)
+        metrics['stop_time_s'] = round(n.now_s() - t_stop, 2)
+        checks['stopped_within_2s'] = stopped and metrics['stop_time_s'] <= 2.0
+        checks['idle_after_stop'] = n.spin_until(
+            lambda: n.status is not None and n.status.state == RobotStatus.STATE_IDLE, 5.0)
+
+    report = {'checks': checks, 'metrics': metrics, 'passed': all(checks.values())}
+    with open(out, 'w') as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    n.destroy_node()
+    rclpy.try_shutdown()
+    sys.exit(0 if report['passed'] else 1)
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/launch/patrol_scenario.launch.py">
+from launch import LaunchDescription
+from launch.actions import (DeclareLaunchArgument, EmitEvent, ExecuteProcess, IncludeLaunchDescription,
+                            RegisterEventHandler, TimerAction)
+from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    nav_pkg = FindPackageShare('my_bot_navigation')
+    sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution(
+            [FindPackageShare('my_bot_gazebo'), 'launch', 'sim.launch.py'])),
+        launch_arguments={'headless': LaunchConfiguration('headless'), 'rviz': 'false'}.items())
+    nav2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution(
+            [FindPackageShare('nav2_bringup'), 'launch', 'bringup_launch.py'])),
+        launch_arguments={
+            'map': PathJoinSubstitution([nav_pkg, 'maps', 'room.yaml']),
+            'params_file': PathJoinSubstitution([nav_pkg, 'config', 'nav2_params.yaml']),
+            'use_sim_time': 'true'}.items())
+    patrol = Node(
+        package='my_bot_apps', executable='patrol_manager', output='screen',
+        parameters=[PathJoinSubstitution([FindPackageShare('my_bot_apps'), 'config', 'patrol.yaml']),
+                    {'use_sim_time': True}])
+    check = Node(
+        package='my_bot_tests', executable='patrol_check', output='screen',
+        arguments=[LaunchConfiguration('result'), LaunchConfiguration('laps')],
+        parameters=[{'use_sim_time': True}])
+    record = ExecuteProcess(
+        cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', LaunchConfiguration('bag'),
+             '/scan', '/odom', '/tf', '/tf_static', '/cmd_vel', '/robot_status', '/amcl_pose'],
+        condition=IfCondition(LaunchConfiguration('record')))
+
+    return LaunchDescription([
+        DeclareLaunchArgument('headless', default_value='true'),
+        DeclareLaunchArgument('result', default_value='/tmp/patrol_result.json'),
+        DeclareLaunchArgument('laps', default_value='2'),
+        DeclareLaunchArgument('record', default_value='true'),
+        DeclareLaunchArgument('bag', default_value='/tmp/patrol_bag'),
+        sim,
+        TimerAction(period=5.0, actions=[nav2, record]),
+        TimerAction(period=10.0, actions=[patrol]),
+        TimerAction(period=15.0, actions=[check]),
+        RegisterEventHandler(OnProcessExit(
+            target_action=check, on_exit=[EmitEvent(event=Shutdown(reason='patrol check done'))])),
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+rm -rf /tmp/patrol_bag
+ros2 launch my_bot_tests patrol_scenario.launch.py laps:=2
+cat /tmp/patrol_result.json
+ros2 bag info /tmp/patrol_bag
+</script>
+
+<h2>T8.7 录包上的不变量检查</h2>
+<p>场景测试结束后，用 T5 的工具对录包做离线检查。巡逻中至少应满足两个不变量：线速度不超过 Nav2 控制器的上限；雷达最近距离始终大于安全阈值。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/check_patrol_bag.py">
+"""用法：python3 -m my_bot_tests.check_patrol_bag <bag> [最大线速度=0.26] [最小雷达距离=0.15]"""
+import math
+import sys
+
+from my_bot_tests.bag_tools import read_messages
+
+
+def main():
+    bag = sys.argv[1]
+    max_v = float(sys.argv[2]) if len(sys.argv) > 2 else 0.26
+    min_d = float(sys.argv[3]) if len(sys.argv) > 3 else 0.15
+    over_speed, too_close, n_cmd, n_scan = [], [], 0, 0
+    t0 = None
+    for topic, msg, t in read_messages(bag, ['/cmd_vel', '/scan']):
+        t0 = t if t0 is None else t0
+        rel = round((t - t0) / 1e9, 2)
+        if topic == '/cmd_vel':
+            n_cmd += 1
+            if abs(msg.linear.x) > max_v + 1e-3:
+                over_speed.append((rel, round(msg.linear.x, 3)))
+        else:
+            n_scan += 1
+            valid = [r for r in msg.ranges if math.isfinite(r) and r > msg.range_min]
+            if valid and min(valid) < min_d:
+                too_close.append((rel, round(min(valid), 3)))
+    print(f'/cmd_vel {n_cmd} 条，/scan {n_scan} 条')
+    print(f'超速 {len(over_speed)} 次 {over_speed[:5]}')
+    print(f'距离过近 {len(too_close)} 次 {too_close[:5]}')
+    ok = n_cmd > 0 and n_scan > 0 and not over_speed and not too_close
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<p>上限 0.26 m/s 对应第 13 章 Nav2 参数中控制器的 <code>max_vel_x</code>，请按你的实际配置修改。若开启了 E1（ros2_control），<code>/cmd_vel</code> 的类型是 TwistStamped，需要改为读取 <code>msg.twist.linear.x</code>。</p>
+
+<h2>T8.8 CI 流水线</h2>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot/.github/workflows/test.yml">
+name: my_bot tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 18 * * *'          # 每天 UTC 18:00（北京时间 02:00）运行场景测试
+  workflow_dispatch:
+
+env:
+  ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+
+jobs:
+  fast:                           # L0–L2：每次提交
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - id: ci
+        uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          target-ros2-distro: jazzy
+          package-name: my_bot_interfaces my_bot_apps my_bot_tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: colcon-test-logs
+          path: ${{ steps.ci.outputs.ros-workspace-directory-name }}/build/*/test_results
+
+  scenarios:                      # L3–L4：每晚 / 手动
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src/my_bot
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          rosdep update
+          rosdep install --from-paths src --ignore-src -r -y
+          colcon build --symlink-install
+      - name: Scenario tests
+        shell: bash
+        run: |
+          source install/setup.bash
+          bash src/my_bot/my_bot_tests/scripts/run_scenarios.sh 5
+      - name: Patrol scenario + bag invariants
+        shell: bash
+        run: |
+          source install/setup.bash
+          timeout 1800 ros2 launch my_bot_tests patrol_scenario.launch.py \
+            result:=$PWD/results/patrol.json bag:=$PWD/results/patrol_bag
+          python3 -c "import json,sys; sys.exit(0 if json.load(open('results/patrol.json'))['passed'] else 1)"
+          python3 -m my_bot_tests.check_patrol_bag results/patrol_bag
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scenario-results
+          path: results/
+</script>
+<div class="callout warn">
+  <strong>CI 的现实约束</strong>
+  <p>托管 CI 机器没有 GPU，仿真可能慢于实时，Gazebo 的 gpu_lidar 需要软件渲染（见 T4.2）。如果托管机器上无法稳定运行仿真，可以使用团队自己的带 GPU 的 runner（self-hosted runner）。各 action 的版本号请以官方仓库的最新发布为准。</p>
+</div>
+
+<h2>T8.9 测试报告</h2>
+<p>下面是报告的结构示例。示例中的数字仅用于说明格式，请填入你自己的实测数据。</p>
+<script type="text/plain" class="code" data-lang="text" data-file="测试报告示例：TR-my_bot-v0.3.md">
+# 测试报告：my_bot v0.3.0（git 8a1d4c2）
+
+## 结论
+有条件发布：功能测试全部通过；DEFECT-022（并发巡逻）已修复并有回归测试；
+narrow_gap 场景成功率 80%（要求 80%，刚好达标），建议下一版本优化膨胀参数。
+
+## 准出条件对照
+| 条件                         | 要求        | 实测                      | 结果 |
+|------------------------------|-------------|---------------------------|------|
+| 单元 / 组件 / 集成测试       | 全部通过    | 64 / 64                   | 通过 |
+| basic_goal 场景              | 100%（10 次）| 10 / 10                  | 通过 |
+| 其余场景                     | ≥ 要求值    | 见附表                    | 通过 |
+| 巡逻 2 圈 + 停车             | 停车 ≤ 2 s  | 1.4 s                     | 通过 |
+| 安全反应时间 p95             | < 100 ms    | 11.8 ms（开发机）          | 通过 |
+| 2 小时长稳内存斜率           | < 1 MB/h    | 最大 0.4 MB/h（controller）| 通过 |
+| S1 / S2 未关闭缺陷           | 0           | 0                         | 通过 |
+
+## 遗留问题与风险
+- DEFECT-023（S3）：空航点列表被接受，巡逻空转。规避：参数文件评审
+- 规格待确认：失败后重新开始时圈数是否清零；巡逻中重启是否恢复进度
+- 未覆盖：真实雷达噪声与反光（无实机数据）；多机器人
+
+## 覆盖说明
+- 执行：L0–L4 自动化测试、仿真场景 4 个 × 10 次、巡逻整机 3 次、长稳 2 小时
+- 未执行：实机测试（无硬件）
+
+## 数据索引
+- CI 运行：（链接）
+- 场景结果：results/20261115_020000/
+- 长稳数据：soak/res_20261114.csv
+</script>
+
+<h2>T8.10 面试中如何讲这个项目</h2>
+<table>
+  <thead><tr><th>可能的问题</th><th>可以讲的内容</th></tr></thead>
+  <tbody>
+    <tr><td>你的测试策略是什么？</td><td>分层（L0–L6）、各层负责的问题类型、运行频率与耗时的取舍、已知的覆盖盲区</td></tr>
+    <tr><td>找到过什么有价值的缺陷？</td><td>DEFECT-022 并发缺陷：现象、为什么现场难定位、如何用假导航器稳定复现、修复与回归；safety_stop 的失效时放行、clamp 的 NaN 问题</td></tr>
+    <tr><td>怎么处理不稳定的测试？</td><td>等待条件代替 sleep、域隔离、仿真时间、成功率与置信区间、不靠重跑变绿</td></tr>
+    <tr><td>仿真测试的局限？</td><td>仿真与现实的差距、哪些问题必须靠实机和回放</td></tr>
+    <tr><td>如何判断测试结果？</td><td>测试预言的设计：容差、不变量、基准对比，以及判定数据源本身是否可信</td></tr>
+  </tbody>
+</table>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>D1 测试策略文档完成</li>
+  <li>D2 单元与性质测试完成，DEFECT-023 已记录</li>
+  <li>D3 巡逻管理器组件测试完成，DEFECT-022 复现、修复并转为回归用例</li>
+  <li>D4 巡逻整机场景测试通过</li>
+  <li>D5 录包不变量检查通过</li>
+  <li>D6 完成 2 小时长稳测试并分析</li>
+  <li>D7 CI 流水线运行成功</li>
+  <li>D8 测试报告与缺陷报告完成</li>
+</ul>
+
+<div class="callout tip">
+  <strong>完成测试篇之后</strong>
+  <p>你已经具备了机器人测试开发岗位的核心能力：能读懂 ROS2 系统、能为各层写自动化测试、能设计场景和统计结果、能组织实机测试并写出高质量的缺陷报告。下一步建议：为一个开源项目（如 Nav2 的某个插件或 turtlebot4 的仿真）补充测试并提交 PR，这是展示能力最直接的方式。</p>
+</div>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

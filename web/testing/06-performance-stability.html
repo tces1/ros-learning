@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T6 性能与稳定性测试 · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t06" data-root="../">
+<main class="content">
+
+<h1>T6　性能与稳定性测试</h1>
+<p class="lead">功能正确只是第一步。机器人的控制回路要按时运行，避障要在几十毫秒内响应，系统要连续工作几十个小时不崩溃、不泄漏内存。本篇讲如何度量频率、延迟和资源占用，如何做长稳测试，以及如何主动注入故障，检验系统在异常下是否安全。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 4 小时</span><span class="tag">测试篇</span><span class="tag">前置：第 4、11 章、T3、T4</span></div>
+
+<h2>本篇目标</h2>
+<ul>
+  <li>理解机器人系统的关键性能指标，并能正确度量与报告</li>
+  <li>编写消息延迟探针和「障碍出现到停车」的反应时间测试</li>
+  <li>监控进程 CPU、内存、线程、文件句柄，分析长稳测试中的内存增长</li>
+  <li>设计并执行故障注入：进程崩溃、传感器中断、网络劣化、CPU 过载</li>
+  <li>把性能指标接入 CI 门禁</li>
+</ul>
+
+<h2>T6.1 指标定义</h2>
+<table>
+  <thead><tr><th>指标</th><th>定义</th><th>度量方法</th><th>示例要求</th></tr></thead>
+  <tbody>
+    <tr><td>发布频率</td><td>单位时间内的消息数</td><td><code>ros2 topic hz</code></td><td>/scan 10 Hz ± 5%</td></tr>
+    <tr><td>抖动</td><td>相邻消息间隔的标准差或最大偏差</td><td>接收时间差统计</td><td>控制指令间隔最大偏差 &lt; 10 ms</td></tr>
+    <tr><td>消息年龄</td><td>接收时刻 − 消息头时间戳</td><td><code>ros2 topic delay</code>、延迟探针</td><td>/scan p95 &lt; 30 ms</td></tr>
+    <tr><td>反应时间</td><td>输入事件发生 → 输出动作发出</td><td>专门的测试脚本</td><td>障碍出现到停车指令 p95 &lt; 100 ms</td></tr>
+    <tr><td>带宽</td><td>每秒数据量</td><td><code>ros2 topic bw</code></td><td>评估无线链路、录包磁盘写入</td></tr>
+    <tr><td>CPU / 内存</td><td>进程的 CPU 占用率、常驻内存（RSS）</td><td>top、pidstat、psutil</td><td>导航栈总 CPU &lt; 60%（目标硬件）</td></tr>
+    <tr><td>内存增长</td><td>长时间运行中 RSS 的增长斜率</td><td>线性回归</td><td>&lt; 1 MB/小时</td></tr>
+    <tr><td>启动时间</td><td>launch 开始 → 系统可用</td><td>脚本计时</td><td>&lt; 30 s</td></tr>
+    <tr><td>恢复时间</td><td>故障发生 → 恢复正常服务</td><td>故障注入 + 计时</td><td>节点崩溃后 5 s 内自动恢复</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>报告百分位数，不要只报平均值</strong>
+  <p>平均延迟 8 ms 的系统可能有 1% 的消息延迟 200 ms，而机器人恰恰在这 1% 的时刻撞上障碍。延迟类指标至少报告 p50、p95、p99 和最大值，并注明样本数、测试时长和硬件。</p>
+</div>
+
+<h2>T6.2 命令行快速检查</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 topic hz /scan --window 100        # 最近 100 条消息的平均频率、最小 / 最大间隔、标准差
+ros2 topic bw /scan                     # 带宽
+ros2 topic delay /scan                  # 基于 header.stamp 的消息年龄（需要消息带 header）
+ros2 node info /safety_stop             # 节点的订阅、发布、服务
+
+top -H -p $(pgrep -f safety_stop | head -1)        # 查看进程内各线程的 CPU
+pidstat -u -r -p $(pgrep -f controller_server) 1   # 每秒输出 CPU 和内存（sysstat 包）
+</script>
+<div class="callout note">
+  <strong>命令行工具本身也有开销</strong>
+  <p><code>ros2 topic hz</code> 是 Python 实现的，对高频大消息（如点云、图像）可能处理不过来，测出的频率偏低。高频话题用 C++ 工具或在被测节点内部统计；同时记得这些工具会给被测话题增加一个订阅者。</p>
+</div>
+
+<h2>T6.3 消息延迟探针</h2>
+<p>一个通用的探针节点：订阅任意带 header 的话题，统计消息年龄和到达间隔，运行指定时长后输出百分位数并保存 CSV：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/latency_probe.py">
+import csv
+import time
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
+from rosidl_runtime_py.utilities import get_message
+
+
+def pct(values, ps=(50, 95, 99)):
+    a = np.asarray(values)
+    return {f'p{p}': round(float(np.percentile(a, p)), 2) for p in ps} | {
+        'max': round(float(a.max()), 2), 'n': int(a.size)}
+
+
+class LatencyProbe(Node):
+    def __init__(self):
+        super().__init__('latency_probe')
+        self.declare_parameter('topic', '/scan')
+        self.declare_parameter('type', 'sensor_msgs/msg/LaserScan')
+        self.declare_parameter('duration', 60.0)
+        self.declare_parameter('csv', '')
+        topic = self.get_parameter('topic').value
+        msg_type = get_message(self.get_parameter('type').value)
+        self.rows = []                                     # (到达时刻, 年龄 ms)
+        self.create_subscription(msg_type, topic, self.on_msg, qos_profile_sensor_data)
+        self.get_logger().info(f'测量 {topic}，持续 {self.get_parameter("duration").value} s')
+
+    def on_msg(self, msg):
+        age = (self.get_clock().now() - Time.from_msg(msg.header.stamp)).nanoseconds / 1e6
+        self.rows.append((time.monotonic(), age))
+
+    def report(self):
+        if len(self.rows) < 2:
+            self.get_logger().error('收到的消息不足，无法统计')
+            return
+        arrivals = np.array([r[0] for r in self.rows])
+        ages = [r[1] for r in self.rows]
+        gaps = np.diff(arrivals) * 1000.0
+        self.get_logger().info(f'消息年龄 ms: {pct(ages)}')
+        self.get_logger().info(f'到达间隔 ms: {pct(gaps)}  标准差 {gaps.std():.2f}')
+        self.get_logger().info(f'平均频率 {1000.0 / gaps.mean():.2f} Hz')
+        path = self.get_parameter('csv').value
+        if path:
+            with open(path, 'w', newline='') as f:
+                csv.writer(f).writerows([('arrival_s', 'age_ms'), *self.rows])
+
+
+def main():
+    rclpy.init()
+    node = LatencyProbe()
+    end = time.monotonic() + node.get_parameter('duration').value
+    try:
+        while rclpy.ok() and time.monotonic() < end:
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except KeyboardInterrupt:
+        pass
+    node.report()
+    node.destroy_node()
+    rclpy.try_shutdown()
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+# setup.py 的 console_scripts 中注册：'latency_probe = my_bot_tests.latency_probe:main'
+ros2 run my_bot_tests latency_probe --ros-args -p topic:=/scan -p duration:=60.0 \
+  -p use_sim_time:=true -p csv:=/tmp/scan_latency.csv
+</script>
+<div class="callout danger">
+  <strong>跨机器测延迟，先同步时钟</strong>
+  <p>消息年龄 = 本机时间 − 发送方写入的时间戳。如果发送方在另一台机器上（例如雷达驱动在机器人上，探针在笔记本上），两台机器的时钟差会直接加到结果里，甚至出现负延迟。测试前用 chrony / PTP 同步时钟，并确认偏差远小于要测的延迟。仿真中两边都使用 <code>use_sim_time</code>。</p>
+</div>
+
+<h2>T6.4 反应时间测试：障碍出现到停车</h2>
+<p>消息年龄只反映单个话题。对安全功能，真正关心的是「从看到障碍到发出停车指令」的端到端时间。下面的脚本对运行中的 safety_stop 做 50 次试验：先发送前方空旷的雷达数据和前进指令，然后突然切换为前方有障碍，测量收到第一条零速度输出的时间。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/reaction_time_test.py">
+import math
+import sys
+import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
+
+
+def make_scan(front, n=360):
+    s = LaserScan()
+    s.header.frame_id = 'laser_link'
+    s.angle_min, s.angle_increment = -math.pi, 2 * math.pi / n
+    s.angle_max = s.angle_min + s.angle_increment * (n - 1)
+    s.range_min, s.range_max = 0.12, 10.0
+    r = [5.0] * n
+    r[n // 2] = front
+    s.ranges = r
+    return s
+
+
+class Harness(Node):
+    def __init__(self):
+        super().__init__('reaction_harness')
+        self.scan_pub = self.create_publisher(LaserScan, 'scan', qos_profile_sensor_data)
+        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_in', 10)
+        self.create_subscription(Twist, 'cmd_vel', self.on_out, 10)
+        self.armed = False
+        self.first_zero = None
+        self.clear, self.blocked = make_scan(3.0), make_scan(0.2)
+        self.fwd = Twist()
+        self.fwd.linear.x = 0.3
+
+    def on_out(self, msg):
+        if self.armed and self.first_zero is None and msg.linear.x == 0.0:
+            self.first_zero = time.monotonic()
+
+    def pump(self, scan, seconds, stop_on_zero=False, rate_hz=50.0):
+        end, next_pub = time.monotonic() + seconds, 0.0
+        while time.monotonic() < end:
+            now = time.monotonic()
+            if now >= next_pub:
+                self.stamp(scan)
+                self.scan_pub.publish(scan)
+                self.cmd_pub.publish(self.fwd)
+                next_pub = now + 1.0 / rate_hz
+            rclpy.spin_once(self, timeout_sec=0.001)
+            if stop_on_zero and self.first_zero is not None:
+                return
+
+    def stamp(self, scan):
+        scan.header.stamp = self.get_clock().now().to_msg()
+
+    def trial(self):
+        self.armed, self.first_zero = False, None
+        self.pump(self.clear, 0.5)                    # 正常行驶
+        self.armed = True
+        t_switch = time.monotonic()
+        self.pump(self.blocked, 1.0, stop_on_zero=True)
+        return None if self.first_zero is None else (self.first_zero - t_switch) * 1000.0
+
+
+def main():
+    rclpy.init()
+    h = Harness()
+    trials = int(sys.argv[1]) if len(sys.argv) > 1 else 50
+    limit_ms = float(sys.argv[2]) if len(sys.argv) > 2 else 100.0
+    h.pump(h.clear, 2.0)                              # 预热：等待发现完成
+    results = [h.trial() for _ in range(trials)]
+    missed = sum(r is None for r in results)
+    lat = np.array([r for r in results if r is not None])
+    h.destroy_node()
+    rclpy.try_shutdown()
+
+    if lat.size == 0:
+        print('所有试验都未在 1 s 内停车')
+        sys.exit(1)
+    p95 = np.percentile(lat, 95)
+    print(f'试验 {trials} 次，未停车 {missed} 次')
+    print(f'反应时间 ms：p50 {np.percentile(lat, 50):.1f}  p95 {p95:.1f}  max {lat.max():.1f}')
+    sys.exit(0 if missed == 0 and p95 < limit_ms else 1)
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+# console_scripts 中注册：'reaction_time_test = my_bot_tests.reaction_time_test:main'
+# （analyze_soak、perf_gate 同理；完整的 setup.py 见 T8）
+ros2 run my_first_nodes safety_stop &                     # 被测节点（不需要仿真）
+ros2 run my_bot_tests reaction_time_test 50 100           # 50 次试验，p95 要求 < 100 ms
+
+# 在 CPU 满载时再测一次，观察 p95 和最大值的变化
+stress-ng --cpu "$(nproc)" --timeout 120s &
+ros2 run my_bot_tests reaction_time_test 50 100
+</script>
+<div class="callout tip">
+  <strong>反应时间要在目标硬件上测</strong>
+  <p>开发机的结果只能说明「算法没有明显的性能问题」。机器人上的工控机或嵌入式板卡性能可能只有开发机的几分之一，同时还在跑导航、感知、录包。验收数据必须来自目标硬件、完整负载下的测试。</p>
+</div>
+
+<h2>T6.5 资源监控</h2>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y python3-psutil sysstat stress-ng
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/resource_monitor.py">
+"""用法：resource_monitor <输出 CSV> <进程关键字> [<进程关键字> ...]
+按命令行关键字匹配进程，每秒记录 CPU、内存、线程、文件句柄；能发现进程重启（PID 变化）。"""
+import csv
+import os
+import sys
+import time
+
+import psutil
+
+
+def main():
+    out, patterns = sys.argv[1], sys.argv[2:]
+    me = os.getpid()
+    tracked = {}                                     # pid -> (关键字, Process)
+    t0 = time.time()
+    with open(out, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['t_s', 'pattern', 'pid', 'cpu_percent', 'rss_mb', 'threads', 'fds'])
+        try:
+            while True:
+                for p in psutil.process_iter(['pid', 'cmdline']):
+                    if p.pid == me or p.pid in tracked:
+                        continue
+                    cmd = ' '.join(p.info['cmdline'] or [])
+                    for pat in patterns:
+                        if pat in cmd:
+                            tracked[p.pid] = (pat, p)
+                            p.cpu_percent(None)      # 第一次调用只建立基准
+                            break
+                t = round(time.time() - t0, 1)
+                for pid, (pat, p) in list(tracked.items()):
+                    try:
+                        with p.oneshot():
+                            w.writerow([t, pat, pid, p.cpu_percent(None),
+                                        round(p.memory_info().rss / 2**20, 1),
+                                        p.num_threads(), p.num_fds()])
+                    except psutil.NoSuchProcess:
+                        w.writerow([t, pat, pid, 'EXITED', '', '', ''])
+                        del tracked[pid]
+                f.flush()
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            pass
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+# console_scripts 中注册：'resource_monitor = my_bot_tests.resource_monitor:main'
+ros2 run my_bot_tests resource_monitor /tmp/res.csv \
+  controller_server planner_server amcl bt_navigator patrol_manager "gz sim"
+</script>
+<div class="callout note">
+  <strong>关键字匹配的注意事项</strong>
+  <p><code>ros2 run</code> 会先启动一个包装进程再启动真正的节点，两者命令行都包含节点名，监控结果中可能出现两条记录，以 CPU 和内存较大的那个为准。CPU 百分比是相对单个核心的，多线程进程可能超过 100%。</p>
+</div>
+
+<h2>T6.6 长稳测试</h2>
+<p>长稳测试（soak test）让系统在真实负载下连续运行很长时间（8 小时、24 小时、72 小时），发现只有时间足够长才会暴露的问题：</p>
+<table>
+  <thead><tr><th>问题</th><th>表现</th><th>监控方法</th></tr></thead>
+  <tbody>
+    <tr><td>内存泄漏</td><td>RSS 持续线性增长，最终被系统杀掉</td><td>RSS 增长斜率</td></tr>
+    <tr><td>句柄泄漏</td><td>文件句柄 / 线程数持续增加，最终「Too many open files」</td><td>fds、threads 的趋势</td></tr>
+    <tr><td>队列堆积</td><td>延迟越来越大</td><td>消息年龄的时间趋势</td></tr>
+    <tr><td>累积误差</td><td>里程计漂移，定位越来越差</td><td>定位误差、AMCL 协方差</td></tr>
+    <tr><td>日志 / 磁盘写满</td><td>运行几天后磁盘满，各种奇怪故障</td><td><code>du -sh ~/.ros/log</code>、磁盘剩余</td></tr>
+    <tr><td>偶发崩溃</td><td>节点隔几小时重启一次</td><td>PID 变化次数、launch 日志</td></tr>
+  </tbody>
+</table>
+<p>以第 16 章的巡逻系统为例：启动巡逻、启动资源监控，同时用 <code>record_run.sh</code> 的快照模式待命，运行一夜。第二天用下面的脚本分析：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/analyze_soak.py">
+"""用法：analyze_soak <res.csv> [预热分钟数=10] [内存斜率上限 MB/h=1.0]"""
+import csv
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+
+def main():
+    path = sys.argv[1]
+    warmup_s = float(sys.argv[2]) * 60 if len(sys.argv) > 2 else 600.0
+    max_slope = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
+
+    series = defaultdict(list)                     # (关键字, pid) -> [(t, cpu, rss, fds)]
+    pids = defaultdict(set)
+    with open(path) as f:
+        for row in csv.DictReader(f):
+            pids[row['pattern']].add(row['pid'])
+            if row['cpu_percent'] == 'EXITED':
+                continue
+            series[(row['pattern'], row['pid'])].append(
+                (float(row['t_s']), float(row['cpu_percent']), float(row['rss_mb']), int(row['fds'])))
+
+    problems = []
+    print(f'{"进程":<20}{"PID":>8}{"时长h":>7}{"CPU均值":>8}{"CPU p95":>8}'
+          f'{"RSS末值MB":>10}{"增长MB/h":>9}{"fds增长":>8}')
+    for (pat, pid), rows in sorted(series.items()):
+        a = np.array([r for r in rows if r[0] >= warmup_s])
+        if len(a) < 60:
+            continue
+        hours = (a[:, 0] - a[0, 0]) / 3600.0
+        slope = np.polyfit(hours, a[:, 2], 1)[0]
+        fd_growth = int(a[-1, 3] - a[0, 3])
+        print(f'{pat:<20}{pid:>8}{hours[-1]:>7.1f}{a[:, 1].mean():>8.1f}'
+              f'{np.percentile(a[:, 1], 95):>8.1f}{a[-1, 2]:>10.1f}{slope:>9.2f}{fd_growth:>8}')
+        if slope > max_slope:
+            problems.append(f'{pat}（PID {pid}）内存增长 {slope:.2f} MB/h，超过 {max_slope}')
+        if fd_growth > 20:
+            problems.append(f'{pat}（PID {pid}）文件句柄增加 {fd_growth}')
+    for pat, ps in pids.items():
+        if len(ps) > 1:
+            problems.append(f'{pat} 出现 {len(ps)} 个不同 PID，期间发生过 {len(ps) - 1} 次重启')
+
+    print('\n'.join(['', '发现的问题：', *problems]) if problems else '\n未发现问题')
+    sys.exit(1 if problems else 0)
+</script>
+<div class="callout warn">
+  <strong>为什么要去掉预热段</strong>
+  <p>进程启动后的前几分钟，内存会因为加载地图、建立缓存、DDS 发现而快速上升，之后趋于平稳。把这段算进去会得到很大的「增长斜率」误报。同理，判断泄漏至少需要数小时的数据；运行 20 分钟就下结论是不可靠的。</p>
+</div>
+
+<h2>T6.7 故障注入</h2>
+<p>主动制造故障，验证系统在异常下的行为是否符合设计。每个故障注入用例都要写清：注入什么、怎么注入、期望系统怎么反应、怎么判定。</p>
+<table>
+  <thead><tr><th>故障</th><th>注入方法</th><th>期望行为（示例）</th></tr></thead>
+  <tbody>
+    <tr><td>节点崩溃</td><td><code>pkill -9 -f safety_stop</code></td><td>底盘在指令超时（如 0.5 s）内停车；若配置了重启，5 s 内恢复</td></tr>
+    <tr><td>传感器中断</td><td>停止雷达驱动或仿真中的 ros_gz_bridge</td><td>safety_stop 禁止前进；Nav2 报错并停止；诊断信息变为 ERROR</td></tr>
+    <tr><td>传感器异常值</td><td>回放中注入 NaN、全 0、全 inf 的帧</td><td>不崩溃；无效数据不能触发前进</td></tr>
+    <tr><td>CPU 过载</td><td><code>stress-ng --cpu $(nproc) --timeout 300s</code></td><td>控制频率下降不超过 x%；反应时间 p95 仍满足要求</td></tr>
+    <tr><td>网络延迟 / 丢包</td><td><code>sudo tc qdisc add dev eth0 root netem delay 100ms 20ms loss 5%</code></td><td>远程遥控有超时保护；重要指令有确认</td></tr>
+    <tr><td>网络断开</td><td>断开 Wi-Fi，或 <code>sudo ip link set wlan0 down</code></td><td>机器人在安全位置停下或继续本地任务（按需求）</td></tr>
+    <tr><td>时间跳变</td><td>回放 bag 时使用 <code>--loop</code>（时间回退）</td><td>节点能处理时间回退（清空 TF 缓存），不卡死</td></tr>
+    <tr><td>磁盘写满</td><td>在测试机上用 <code>fallocate</code> 占满分区</td><td>录包失败不影响控制；有告警</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+# 网络劣化注入与恢复（务必记得恢复）
+sudo tc qdisc add dev eth0 root netem delay 100ms 20ms loss 5%
+tc qdisc show dev eth0
+sudo tc qdisc del dev eth0 root
+</script>
+<div class="callout danger">
+  <strong>一个典型的故障注入发现：下游没有指令超时</strong>
+  <p>在仿真中杀掉 safety_stop，你可能会发现小车继续以最后的速度前进，直到撞墙。原因是 Gazebo 的 DiffDrive 插件会一直执行最后收到的速度指令。真实底盘驱动和 ros2_control 的 <code>diff_drive_controller</code>（参数 <code>cmd_vel_timeout</code>）都应该有指令超时。<strong>任何发出运动指令的链路，最末端都必须有超时停车</strong>，这是实机测试前必须验证的项目。</p>
+</div>
+<div class="callout note">
+  <strong>同一台机器上的通信可能绕过网络</strong>
+  <p>DDS 在同一台主机内常使用共享内存传输，<code>tc</code> 对它不起作用。要测试网络劣化的影响，应该让发布方和订阅方运行在两台机器上（例如机器人与遥控终端），在真实网卡上注入。</p>
+</div>
+<h3>用 launch 配置自动重启并测量恢复时间</h3>
+<script type="text/plain" class="code" data-lang="python">
+Node(package='my_first_nodes', executable='safety_stop',
+     respawn=True, respawn_delay=2.0)        # 崩溃后 2 秒重启
+</script>
+<p>测量方法：<code>pkill -9</code> 的同时记录时间，用延迟探针或 <code>ros2 topic echo</code> 观察 <code>/cmd_vel</code> 何时恢复输出。重启后要检查：参数是否恢复（未持久化的运行时参数修改会丢失）、状态是否正确（例如巡逻进度）。</p>
+
+<h2>T6.8 深入分析：ros2_tracing</h2>
+<p>当需要知道「延迟花在哪一步」时（回调排队、执行、DDS 传输），可以使用 <a href="https://github.com/ros2/ros2_tracing" target="_blank" rel="noopener">ros2_tracing</a>。它基于 LTTng，在 rclcpp / rcl / rmw 的关键位置埋点，开销很低，可以在目标硬件上使用。基本流程：开启跟踪会话（<code>ros2 trace</code>）、运行系统、结束会话，再用 tracetools_analysis 或 Trace Compass 分析回调耗时和消息流。具体安装和参数以官方文档为准。</p>
+
+<h2>T6.9 性能门禁</h2>
+<p>把关键性能指标接入 CI，防止性能悄悄退化。思路是保存基线，每次运行与基线比较，超出容差即失败：</p>
+<script type="text/plain" class="code" data-lang="text" data-file="my_bot_tests/perf/baseline.json">
+{
+  "safety_reaction_p95_ms": {"value": 12.0, "max_regression": 0.5},
+  "scan_age_p95_ms":        {"value": 8.0,  "max_regression": 0.5},
+  "controller_cpu_mean":    {"value": 35.0, "max_regression": 0.3}
+}
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/perf_gate.py">
+"""用法：perf_gate <baseline.json> <current.json>；当前值超过 基线 × (1 + max_regression) 即失败。"""
+import json
+import sys
+
+
+def main():
+    baseline = json.load(open(sys.argv[1]))
+    current = json.load(open(sys.argv[2]))
+    failed = False
+    for key, spec in baseline.items():
+        limit = spec['value'] * (1 + spec['max_regression'])
+        value = current.get(key)
+        ok = value is not None and value <= limit
+        failed |= not ok
+        print(f'{"通过" if ok else "失败"}  {key}: 当前 {value}，基线 {spec["value"]}，上限 {limit:.1f}')
+    sys.exit(1 if failed else 0)
+</script>
+<div class="callout warn">
+  <strong>共享 CI 机器上的性能数据噪声很大</strong>
+  <p>云端 CI 的虚拟机性能波动可达数十个百分点，所以容差要设得比较宽（如 50%），只用来发现「数量级」的退化。精确的性能回归应在固定的专用机器（最好是目标硬件）上定时运行，并把每次的结果画成趋势图。</p>
+</div>
+
+<h2>动手练习</h2>
+<ol>
+  <li>用延迟探针测量仿真中 <code>/scan</code> 的消息年龄和频率，分别在空闲和 <code>stress-ng</code> 满载时测试，比较 p95 和最大值。</li>
+  <li>运行反应时间测试，然后在 safety_stop 的 <code>on_scan</code> 中加入 <code>time.sleep(0.05)</code> 模拟慢算法，观察结果如何变化。</li>
+  <li>让巡逻系统运行至少 2 小时，同时运行资源监控，用 <code>analyze_soak</code> 分析结果。</li>
+  <li>在仿真中杀掉 safety_stop，观察小车行为；思考并写下应在哪一层增加指令超时。</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么延迟要报告 p95 / p99 / 最大值，而不只是平均值？</summary>
+<div>机器人的安全风险来自最坏情况。平均值会被大量正常样本稀释，掩盖偶发的长延迟；而避障恰恰需要在每一次都及时响应。百分位数和最大值才能反映尾部风险。</div></details>
+<details class="quiz"><summary>2. 跨机器测得的消息年龄是负数，说明什么？</summary>
+<div>两台机器时钟不同步：接收方时钟落后于发送方。需要先用 chrony 或 PTP 同步时钟，再进行延迟测量。</div></details>
+<details class="quiz"><summary>3. 长稳测试中某进程 RSS 前 10 分钟从 80 MB 涨到 150 MB，之后 8 小时稳定在 150–152 MB，有泄漏吗？</summary>
+<div>大概率没有。前 10 分钟是加载与缓存建立的预热阶段；之后斜率约 0.25 MB/h，在正常波动范围内。判断泄漏要看预热后的长期斜率。</div></details>
+<details class="quiz"><summary>4. 为什么「下游指令超时」是实机测试前必须验证的？</summary>
+<div>上游任何一个节点崩溃、卡死或网络中断，都会让运动指令停止更新。如果底盘一直执行最后一条指令，机器人会失控运动。底盘侧的超时停车是最后一道防线，与上游软件是否正确无关。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能说出至少 6 个性能指标并给出度量方法</li>
+  <li>用延迟探针得到过 p50 / p95 / p99 / max 数据</li>
+  <li>运行过反应时间测试，并在 CPU 满载下复测</li>
+  <li>完成过至少 2 小时的长稳测试并分析内存斜率</li>
+  <li>执行过至少 3 种故障注入，并记录系统反应</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

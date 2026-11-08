@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T5 数据回放测试 · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t05" data-root="../">
+<main class="content">
+
+<h1>T5　数据回放测试</h1>
+<p class="lead">仿真数据再逼真也是「造出来的」。rosbag 里录下的是机器人在真实世界中看到的一切：反光、噪声、遮挡、丢帧。回放测试用这些真实数据驱动软件，是复现现场问题、做感知与定位回归测试的核心手段。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">测试篇</span><span class="tag">前置：第 11 章、T2、T3</span></div>
+
+<h2>本篇目标</h2>
+<ul>
+  <li>制定面向测试的录包规范：录什么、怎么命名、要附带哪些元数据</li>
+  <li>区分离线直读测试和在线回放测试，各自写一个例子</li>
+  <li>掌握测试预言的几种形式：基准对比、容差、不变量、版本对比</li>
+  <li>用 bag 复现现场问题，裁剪出最小复现数据，并纳入回归库</li>
+  <li>避开回放测试中的时间、QoS、坐标变换陷阱</li>
+</ul>
+
+<h2>T5.1 面向测试的录包规范</h2>
+<table>
+  <thead><tr><th>类别</th><th>话题</th><th>为什么要录</th></tr></thead>
+  <tbody>
+    <tr><td>传感器输入</td><td><code>/scan</code>、<code>/imu</code>、<code>/odom</code>、相机（按需）</td><td>回放时驱动被测算法</td></tr>
+    <tr><td>坐标变换</td><td><code>/tf</code>、<code>/tf_static</code></td><td>缺了它，大部分数据无法使用</td></tr>
+    <tr><td>控制指令</td><td><code>/cmd_vel</code>、遥控输入</td><td>判断机器人「想做什么」</td></tr>
+    <tr><td>中间结果</td><td>规划路径、代价地图（可降频）、定位位姿</td><td>定位问题出在哪一环</td></tr>
+    <tr><td>状态与诊断</td><td><code>/robot_status</code>、<code>/diagnostics</code>、<code>/rosout</code></td><td>把日志和数据放在同一时间轴上</td></tr>
+  </tbody>
+</table>
+<p>每次测试录包都应附带足够还原现场的元数据。把它写成脚本，测试人员一条命令即可开始：</p>
+<script type="text/plain" class="code" data-lang="bash" data-file="my_bot_tests/scripts/record_run.sh">
+#!/usr/bin/env bash
+# 用法：record_run.sh <用例或缺陷编号> [额外话题 ...]
+set -eu
+CASE=${1:?请提供用例编号，如 TC-NAV-012 或 DEFECT-014}
+shift
+NAME="$(date +%Y%m%d_%H%M%S)_${CASE}"
+DIR="$HOME/test_data/runs/$NAME"
+mkdir -p "$DIR"
+
+# 1) 版本信息：代码版本、ROS 环境
+(cd ~/ros2_ws/src/my_bot && git rev-parse HEAD && git status --short) > "$DIR/git.txt" 2>&1 || true
+ros2 doctor --report > "$DIR/doctor.txt" 2>&1 || true
+
+# 2) 所有节点的当前参数
+for n in $(ros2 node list); do
+  ros2 param dump "$n" > "$DIR/params_$(echo "$n" | tr '/' '_').yaml" 2>/dev/null || true
+done
+
+# 3) 录包（MCAP + zstd 压缩，每 10 分钟分割一个文件）
+ros2 bag record -s mcap --storage-preset-profile zstd_fast --max-bag-duration 600 \
+  -o "$DIR/bag" /scan /odom /tf /tf_static /cmd_vel /cmd_vel_in /robot_status \
+  /amcl_pose /plan /diagnostics /rosout "$@"
+</script>
+<div class="callout tip">
+  <strong>「黑匣子」录制</strong>
+  <p>长时间运行时全程录包会占满磁盘。Jazzy 的 rosbag2 支持快照模式：<code>ros2 bag record --snapshot-mode --max-cache-size 500000000 ...</code> 只在内存中保留最近的数据，出问题时调用记录器的 <code>~/snapshot</code> 服务（类型 <code>rosbag2_interfaces/srv/Snapshot</code>）把缓存写入磁盘。很多团队把它接到「急停按下」或「任务失败」事件上，自动保存事故前的数据。</p>
+</div>
+
+<h2>T5.2 两种回放测试</h2>
+<table>
+  <thead><tr><th></th><th>离线直读</th><th>在线回放</th></tr></thead>
+  <tbody>
+    <tr><td>做法</td><td>用 rosbag2_py 读取消息，直接调用算法函数</td><td><code>ros2 bag play</code> 发布消息，被测节点作为独立进程运行</td></tr>
+    <tr><td>确定性</td><td>完全确定，每次结果相同</td><td>受进程调度、时序影响，结果可能有微小差异</td></tr>
+    <tr><td>速度</td><td>远快于实时</td><td>默认按实时速度</td></tr>
+    <tr><td>覆盖范围</td><td>只覆盖算法本身</td><td>覆盖节点、QoS、参数、时间处理</td></tr>
+    <tr><td>适合</td><td>感知、定位算法的精度回归</td><td>节点行为、安全逻辑、端到端回归</td></tr>
+  </tbody>
+</table>
+<p>两种方式都需要算法与 ROS 分离（T2 的原则）。先把 safety_stop 中计算前方最近距离的逻辑提取为纯函数：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/scan_utils.py">
+import math
+
+import numpy as np
+
+
+def front_min_distance(scan, half_angle_rad):
+    """返回前方 ±half_angle 扇区内的最近有效距离；没有有效点时返回 inf。"""
+    ranges = np.asarray(scan.ranges, dtype=float)
+    if ranges.size == 0:
+        return math.inf
+    angles = scan.angle_min + np.arange(ranges.size) * scan.angle_increment
+    angles = np.arctan2(np.sin(angles), np.cos(angles))      # 兼容 0~2π 的雷达
+    valid = np.isfinite(ranges) & (ranges > scan.range_min) & (ranges < scan.range_max)
+    front = valid & (np.abs(angles) < half_angle_rad)
+    return float(ranges[front].min()) if front.any() else math.inf
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/safety_stop.py（on_scan 改为调用纯函数）">
+from my_first_nodes.scan_utils import front_min_distance
+
+    def on_scan(self, scan: LaserScan):
+        half = math.radians(self.get_parameter('half_angle_deg').value)
+        self.min_front = front_min_distance(scan, half)
+        self.last_scan_time = self.get_clock().now()
+</script>
+<div class="callout note">
+  <strong>重构时顺手修了一个隐藏缺陷</strong>
+  <p>原代码直接用 <code>abs(angle) &lt; half</code> 判断前方，前提是雷达角度范围为 −π~π。很多真实雷达输出 0~2π，此时「正前方 ±30°」中负角度那一半（330°~360°）会被漏掉。纯函数中对角度做了归一化。这类问题只有用真实设备的数据回放才容易暴露——这正是回放测试的价值。</p>
+</div>
+
+<h2>T5.3 读写 bag 的工具函数</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/my_bot_tests/bag_tools.py">
+import rosbag2_py
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
+
+
+def open_reader(uri, storage_id='mcap'):
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=uri, storage_id=storage_id),
+                rosbag2_py.ConverterOptions('', ''))
+    return reader
+
+
+def read_messages(uri, topics=None, storage_id='mcap'):
+    """逐条产出 (话题, 反序列化后的消息, 时间戳_ns)。"""
+    reader = open_reader(uri, storage_id)
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+    if topics:
+        missing = set(topics) - set(types)
+        if missing:
+            raise ValueError(f'bag 中缺少话题: {sorted(missing)}')
+        reader.set_filter(rosbag2_py.StorageFilter(topics=list(topics)))
+    msg_classes = {}
+    while reader.has_next():
+        topic, data, t_ns = reader.read_next()
+        if topic not in msg_classes:
+            msg_classes[topic] = get_message(types[topic])
+        yield topic, deserialize_message(data, msg_classes[topic]), t_ns
+
+
+def cut_bag(src, dst, start_s, end_s, topics=None, storage_id='mcap'):
+    """截取 [start_s, end_s]（相对 bag 开始的秒数）；/tf_static 无论时间都保留。"""
+    reader = open_reader(src, storage_id)
+    metas = reader.get_all_topics_and_types()
+    if topics:
+        metas = [m for m in metas if m.name in topics or m.name == '/tf_static']
+    keep = {m.name for m in metas}
+
+    writer = rosbag2_py.SequentialWriter()
+    writer.open(rosbag2_py.StorageOptions(uri=dst, storage_id=storage_id),
+                rosbag2_py.ConverterOptions('cdr', 'cdr'))
+    for m in metas:
+        writer.create_topic(m)
+
+    t0 = None
+    written = 0
+    while reader.has_next():
+        topic, data, t_ns = reader.read_next()
+        t0 = t_ns if t0 is None else t0
+        if topic not in keep:
+            continue
+        rel = (t_ns - t0) / 1e9
+        if topic == '/tf_static' or start_s <= rel <= end_s:
+            writer.write(topic, data, t_ns)
+            written += 1
+    del writer                                   # 关闭并写入索引
+    return written
+</script>
+<div class="callout danger">
+  <strong>裁剪 bag 时最常见的错误：丢掉 /tf_static</strong>
+  <p>静态变换通常只在开头发布一次。按时间截取后，片段里就没有它了，回放时所有传感器坐标系都找不到。<code>cut_bag</code> 无论时间窗口如何都保留 <code>/tf_static</code>。同理，地图（<code>/map</code>，同样是 TRANSIENT_LOCAL）也要特殊处理。</p>
+</div>
+<script type="text/plain" class="code" data-lang="bash">
+# 截取现场 bag 中第 312~342 秒的片段，作为 DEFECT-014 的最小复现数据
+python3 -c "from my_bot_tests.bag_tools import cut_bag; \
+print(cut_bag('runs/20261103_101500_DEFECT-014/bag', 'bags/defect_014_corner', 312, 342, \
+['/scan', '/odom', '/tf', '/cmd_vel_in']))"
+ros2 bag info bags/defect_014_corner
+</script>
+
+<h2>T5.4 离线直读：基准对比回归</h2>
+<p>「基准对比」（golden master）测试：第一次运行时把输出保存为基准文件，人工确认正确后提交；之后每次运行都与基准对比，任何超出容差的变化都会被发现。</p>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_tests/test/replay_manifest.yaml">
+# 回归 bag 清单；路径相对于环境变量 TEST_DATA_DIR（默认 ~/test_data）
+bags:
+  - name: corridor_walk
+    path: bags/corridor_walk
+    source: 实验室走廊，人工遥控，2026-10-28
+    half_angle_deg: 30
+  - name: defect_014_corner
+    path: bags/defect_014_corner
+    source: 现场 B 栋 3 楼转角，DEFECT-014 最小复现片段
+    half_angle_deg: 30
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/test/test_scan_golden.py">
+import csv
+import math
+import os
+from pathlib import Path
+
+import pytest
+import yaml
+from my_bot_tests.bag_tools import read_messages
+from my_first_nodes.scan_utils import front_min_distance
+
+HERE = Path(__file__).parent
+DATA = Path(os.environ.get('TEST_DATA_DIR', Path.home() / 'test_data'))
+UPDATE = os.environ.get('UPDATE_GOLDEN') == '1'
+MANIFEST = yaml.safe_load((HERE / 'replay_manifest.yaml').read_text())['bags']
+
+
+def compute(bag, half_angle_deg):
+    half = math.radians(half_angle_deg)
+    return [(t, front_min_distance(msg, half)) for _, msg, t in read_messages(str(bag), ['/scan'])]
+
+
+@pytest.mark.parametrize('entry', MANIFEST, ids=[e['name'] for e in MANIFEST])
+def test_front_min_matches_golden(entry):
+    bag = DATA / entry['path']
+    if not bag.exists():
+        pytest.skip(f'测试数据不存在: {bag}')
+    result = compute(bag, entry['half_angle_deg'])
+    golden = HERE / 'golden' / f'{entry["name"]}_front_min.csv'
+
+    if UPDATE or not golden.exists():
+        golden.parent.mkdir(exist_ok=True)
+        with golden.open('w', newline='') as f:
+            csv.writer(f).writerows(result)
+        pytest.skip(f'已生成基准文件 {golden.name}，请人工检查后提交')
+
+    with golden.open() as f:
+        expected = [(int(t), float(d)) for t, d in csv.reader(f)]
+    assert len(result) == len(expected), '帧数变化：数据读取或过滤逻辑有改动'
+    diffs = [(t, e, r) for (t, r), (_, e) in zip(result, expected)
+             if not (math.isinf(e) and math.isinf(r)) and abs(e - r) > 1e-3]
+    assert not diffs, f'{len(diffs)} 帧超出容差，前 5 帧 (时间, 基准, 实际): {diffs[:5]}'
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src/my_bot/my_bot_tests
+python3 -m pytest test/test_scan_golden.py -v               # 对比基准
+UPDATE_GOLDEN=1 python3 -m pytest test/test_scan_golden.py  # 算法有意修改后，重新生成基准
+git diff test/golden/                                       # 人工审查基准变化后再提交
+</script>
+<div class="callout warn">
+  <strong>基准文件的更新必须经过审查</strong>
+  <p>基准对比测试最大的风险是「测试失败 → 直接更新基准 → 测试通过」，缺陷就这样被写进了基准。约定：基准文件的修改必须在合并请求中单独说明原因，并由测试负责人审查。</p>
+</div>
+
+<h2>T5.5 在线回放：用不变量检查安全逻辑</h2>
+<p>在线回放时，被测节点和真实系统中一样作为独立进程运行。由于时序存在微小差异，逐帧对比基准不再可靠，更好的预言是<strong>不变量</strong>：无论输入是什么，都必须成立的规则。对 safety_stop 来说：</p>
+<div class="callout note">
+  <strong>安全不变量</strong>
+  <p>如果前方最近距离持续 0.3 s 以上都小于（停车距离 − 0.05 m），那么这段时间末尾输出的前进速度必须为 0。0.3 s 的窗口和 0.05 m 的余量用来吸收进程间的时序差异，避免误报。</p>
+</div>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_tests/replay_tests/test_safety_replay.py">
+import math
+import os
+import tempfile
+import unittest
+
+import launch
+import launch_ros.actions
+import launch_testing.actions
+import launch_testing.asserts
+import pytest
+from launch.actions import ExecuteProcess, TimerAction
+from my_bot_tests.bag_tools import read_messages
+from my_first_nodes.scan_utils import front_min_distance
+
+BAG = os.environ.get('REPLAY_BAG', os.path.expanduser('~/test_data/bags/corridor_walk'))
+OUT = os.path.join(tempfile.mkdtemp(prefix='replay_'), 'out')
+STOP, HALF_DEG = 0.4, 30.0
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    safety = launch_ros.actions.Node(
+        package='my_first_nodes', executable='safety_stop',
+        parameters=[{'use_sim_time': True, 'stop_distance': STOP, 'half_angle_deg': HALF_DEG}])
+    record = ExecuteProcess(
+        cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', OUT, '/scan', '/cmd_vel'],
+        output='screen')
+    play = ExecuteProcess(
+        cmd=['ros2', 'bag', 'play', BAG, '--clock', '--topics', '/scan', '/cmd_vel_in'],
+        output='screen')
+    return launch.LaunchDescription([
+        safety, record,
+        TimerAction(period=3.0, actions=[play]),      # 等被测节点和记录器就绪
+        launch_testing.actions.ReadyToTest(),
+    ]), {'play': play, 'safety': safety}
+
+
+class TestReplay(unittest.TestCase):
+
+    def test_wait_for_playback(self, proc_info, play):
+        proc_info.assertWaitForShutdown(process=play, timeout=900)
+
+
+def find_violations(out_bag, settle=0.3, margin=0.05):
+    scans, cmds = [], []
+    half = math.radians(HALF_DEG)
+    for topic, msg, t in read_messages(out_bag, ['/scan', '/cmd_vel']):
+        if topic == '/scan':
+            scans.append((t / 1e9, front_min_distance(msg, half)))
+        else:
+            cmds.append((t / 1e9, msg.linear.x))
+    violations = []
+    for t, v in cmds:
+        if v <= 0.0:
+            continue
+        window = [d for ts, d in scans if t - settle <= ts <= t]
+        if window and all(d < STOP - margin for d in window):
+            violations.append((round(t, 3), v, round(min(window), 3)))
+    return violations, len(scans), len(cmds)
+
+
+@launch_testing.post_shutdown_test()
+class TestReplayInvariants(unittest.TestCase):
+
+    def test_safety_node_exited_cleanly(self, proc_info, safety):
+        launch_testing.asserts.assertExitCodes(proc_info, process=safety)
+
+    def test_no_forward_motion_when_blocked(self):
+        violations, n_scan, n_cmd = find_violations(OUT)
+        self.assertGreater(n_scan, 0, '输出 bag 中没有 /scan，记录器可能未启动')
+        self.assertGreater(n_cmd, 0, '没有 /cmd_vel 输出：bag 中是否有 /cmd_vel_in？')
+        self.assertEqual(violations, [], f'{len(violations)} 次在障碍前方仍输出前进速度')
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+# 回放测试依赖数据文件，不放进默认的 colcon test，单独运行
+REPLAY_BAG=~/test_data/bags/defect_014_corner \
+  launch_test src/my_bot/my_bot_tests/replay_tests/test_safety_replay.py
+</script>
+
+<h2>T5.6 测试预言的几种形式</h2>
+<table>
+  <thead><tr><th>形式</th><th>做法</th><th>适用</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>基准对比</td><td>与人工确认过的历史输出逐项比较</td><td>确定性算法（离线直读）</td><td>基准更新必须审查</td></tr>
+    <tr><td>容差对比</td><td>与真值比较，误差在阈值内即可</td><td>定位、检测精度（需要标注真值）</td><td>真值本身的精度</td></tr>
+    <tr><td>不变量</td><td>检查任何时候都必须成立的规则</td><td>安全逻辑、限速、状态机</td><td>时间窗口和余量要吸收时序差异</td></tr>
+    <tr><td>指标阈值</td><td>统计指标（如检测召回率 ≥ 95%）</td><td>感知模型、长时间数据</td><td>指标要分场景统计，否则平均值掩盖问题</td></tr>
+    <tr><td>版本对比</td><td>同一 bag 上比较新旧版本的输出差异</td><td>没有真值、重构验证</td><td>只能发现「变化」，变化是否正确仍需人工判断</td></tr>
+  </tbody>
+</table>
+
+<h2>T5.7 用 bag 复现现场问题</h2>
+<pre class="diagram">
+ 现场报告：转角处机器人偶发急停（DEFECT-014）
+   │
+   ├─ 1. 拿到完整 bag 与元数据（git.txt、params_*.yaml）
+   ├─ 2. 在 Foxglove / PlotJuggler 中定位异常时间点：/cmd_vel 突然为 0
+   ├─ 3. 检查同一时刻的 /scan：发现前方有一帧距离 0.15 m 的孤立点（地面反光）
+   ├─ 4. 用 cut_bag 截取前后 15 s，得到 2 MB 的最小复现数据
+   ├─ 5. 本地回放 10 次，确认每次都能复现
+   ├─ 6. 修复（例如要求连续 N 个相邻点都过近才判定为障碍）
+   ├─ 7. 把片段加入 replay_manifest.yaml 与在线回放测试
+   └─ 8. 同时确认修复没有破坏「真障碍必须停车」：在含真实障碍的 bag 上回放
+</pre>
+<div class="callout tip">
+  <strong>修复误报时，一定要同时验证漏报</strong>
+  <p>为了消除「反光导致误停车」而加的滤波，可能让细小的真实障碍（桌腿、人的脚）也被滤掉。安全相关修改要同时用「误报样本」和「真障碍样本」两类数据回归。</p>
+</div>
+
+<h2>T5.8 回放的常见陷阱</h2>
+<table>
+  <thead><tr><th>陷阱</th><th>症状</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td>忘记 <code>--clock</code> 或 <code>use_sim_time</code></td><td>TF 报外推错误，消息被丢弃</td><td>回放时加 <code>--clock</code>，被测节点设置 <code>use_sim_time:=true</code>；bag 中已有 <code>/clock</code> 时不要再加 <code>--clock</code></td></tr>
+    <tr><td>回放与真实系统同时运行</td><td>两个 <code>/tf</code>、两个 <code>/scan</code> 来源</td><td>只启动被测节点；回放不需要的话题用 <code>--topics</code> 排除</td></tr>
+    <tr><td>回放了被测节点的输出</td><td>被测节点的输出与 bag 中的旧输出混在一起</td><td>只回放输入话题；或用 <code>--remap</code> 把旧输出改名</td></tr>
+    <tr><td>QoS 不一致</td><td>TRANSIENT_LOCAL 的话题（如 <code>/tf_static</code>、<code>/map</code>）晚启动的节点收不到</td><td>用 <code>--qos-profile-overrides-path</code> 指定回放 QoS；或先启动被测节点再回放</td></tr>
+    <tr><td>消息定义已变化</td><td>旧 bag 无法反序列化</td><td>接口变更需要评审；重要 bag 在接口变更时用转换脚本迁移</td></tr>
+    <tr><td>数据量太大</td><td>CI 下载慢、存储贵</td><td>裁剪最小片段；大文件用 Git LFS 或对象存储，仓库只放清单</td></tr>
+    <tr><td>隐私</td><td>相机数据中有人脸、文件</td><td>遵守数据管理规定，必要时脱敏或只保留雷达数据</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="yaml" data-file="replay_qos.yaml（用于 --qos-profile-overrides-path）">
+/tf_static:
+  history: keep_all
+  reliability: reliable
+  durability: transient_local
+/map:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+</script>
+
+<h2>动手练习</h2>
+<ol>
+  <li>在仿真中遥控小车靠近墙壁再离开，用 <code>record_run.sh</code> 录包（遥控发布到 <code>/cmd_vel_in</code>，经过 safety_stop）。</li>
+  <li>用这个 bag 生成 <code>test_scan_golden.py</code> 的基准，然后故意把 <code>front_min_distance</code> 中的 <code>&gt;</code> 改成 <code>&gt;=</code>，观察测试是否发现变化。</li>
+  <li>运行在线回放测试。然后注释掉 safety_stop 中的停车逻辑，确认不变量测试能够失败（验证测试本身是有效的）。</li>
+  <li>用 <code>cut_bag</code> 截取一个 10 秒的片段，用 <code>ros2 bag info</code> 确认 <code>/tf_static</code> 仍在其中。</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 离线直读和在线回放各自的优缺点是什么？</summary>
+<div>离线直读：完全确定、速度快，适合算法精度回归，但测不到节点、QoS、时间处理等问题。在线回放：覆盖完整节点行为，更接近真实运行，但受时序影响，需要用不变量或容差设计预言。</div></details>
+<details class="quiz"><summary>2. 为什么在线回放测试中要「故意破坏被测代码」看测试是否失败？</summary>
+<div>验证测试本身的有效性。不变量写错、话题名写错、数据为空时，测试可能永远通过而什么都没检查。这种做法叫变异测试（mutation testing）的手工版本。上面的测试中也断言了「scan 和 cmd 数量大于 0」，防止空数据导致的假通过。</div></details>
+<details class="quiz"><summary>3. 为消除反光误报而修改了障碍检测，回归时要注意什么？</summary>
+<div>必须同时验证漏报：用包含真实小障碍（桌腿、脚、细杆）的 bag 回放，确认它们仍能触发停车。安全功能中「漏报」通常比「误报」后果严重得多。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>有一套录包脚本，自动保存代码版本和参数</li>
+  <li>写出并运行了离线基准对比测试</li>
+  <li>写出并运行了在线回放 + 不变量测试，并用故意破坏的代码验证过它有效</li>
+  <li>会裁剪 bag 并保留 /tf_static</li>
+  <li>能说出至少 5 种回放陷阱</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

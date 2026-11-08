@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 13 章 Navigation2 导航 · ROS2 中文教材</title>
+<title>第 13 章 Navigation2 导航 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch13" data-root="../">
@@ -375,6 +375,28 @@ if __name__ == '__main__':
     <tr><td>机器人不动但有路径</td><td><code>/cmd_vel</code> 没有到达底盘：话题名、Twist / TwistStamped 类型、collision_monitor 是否阻止</td></tr>
   </tbody>
 </table>
+
+<h2>测试视角</h2>
+<p>导航是移动机器人测试工作量最大的部分。Nav2 本身经过大量测试，项目中的问题大多出在<strong>参数、地图、传感器配置和场景</strong>上，因此测试重点是场景覆盖和参数回归。</p>
+<table>
+  <thead><tr><th>维度</th><th>指标 / 检查</th></tr></thead>
+  <tbody>
+    <tr><td>任务</td><td>到达成功率、用时、路径长度与最短路径之比</td></tr>
+    <tr><td>精度</td><td>到点位置误差、朝向误差；定位误差（与真值对比）</td></tr>
+    <tr><td>安全</td><td>全程最小障碍距离；是否有急停或碰撞</td></tr>
+    <tr><td>鲁棒性</td><td>未知障碍、狭窄通道、动态障碍、不可达目标的行为；恢复行为触发次数</td></tr>
+    <tr><td>系统</td><td>生命周期启动是否全部成功；参数文件修改后的回归</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>参数修改必须回归</strong>
+  <p>调大 <code>inflation_radius</code> 可以让机器人离墙更远，也可能让窄门无法通过；提高控制器速度可以提升效率，也可能让制动距离不够。每次参数修改都应在仿真场景库上重跑并比较成功率，而不是只在一个场景里「看起来更好」。</p>
+</div>
+<p>本章的 <code>BasicNavigator</code> 正是编写场景测试的基础：发送目标、等待、读取结果。把「看着 RViz 判断到没到」变成代码中的判定，就是场景测试的起点。</p>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>场景定义、自动判定、成功率与置信区间：<a href="../testing/04-simulation-scenario.html">T4 仿真与场景测试</a>。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 为什么局部代价地图使用 <code>odom</code> 坐标系，而全局代价地图使用 <code>map</code>？</summary>

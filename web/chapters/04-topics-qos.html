@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 4 章 话题与 QoS · ROS2 中文教材</title>
+<title>第 4 章 话题与 QoS · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch04" data-root="../">
@@ -331,6 +331,31 @@ def main():
     <tr><td><code>rospy.Time.now()</code></td><td><code>node.get_clock().now()</code></td></tr>
   </tbody>
 </table>
+
+<h2>测试视角</h2>
+<p>话题通信的缺陷有一个共同特点：<strong>大多数不报错</strong>。QoS 不兼容时订阅者只是收不到数据；队列满了消息被静默丢弃；字段填错了单位，接收方照常使用。因此测试必须主动检查。</p>
+<table>
+  <thead><tr><th>缺陷类型</th><th>表现</th><th>检查方法</th></tr></thead>
+  <tbody>
+    <tr><td>QoS 不兼容</td><td>订阅者收不到任何消息，无报错（新版本会打印一条警告）</td><td><code>ros2 topic info -v</code> 对比双方 QoS；集成测试中断言 QoS（T3.4）</td></tr>
+    <tr><td>队列深度不足</td><td>处理慢时丢消息，序号不连续</td><td>在消息中带序号或时间戳，测试中检查连续性（T3.3）</td></tr>
+    <tr><td>频率不达标</td><td>下游算法输入不足</td><td><code>ros2 topic hz</code>；性能测试（T6）</td></tr>
+    <tr><td>字段值越界</td><td>uint8 溢出、百分比超过 100、NaN</td><td>参数化 / 性质测试（T2）；集成测试中断言字段范围</td></tr>
+    <tr><td>时间戳错误</td><td>header.stamp 为 0 或使用了错误的时钟</td><td>断言时间戳单调递增、与当前时间接近</td></tr>
+    <tr><td>回调阻塞</td><td>节点对其他话题、服务失去响应</td><td>在长回调执行期间调用服务，测量响应时间</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 topic info /chatter --verbose        # 查看每个发布者 / 订阅者的 QoS
+# 手工注入测试数据：以 10 Hz 发布前进指令
+ros2 topic pub --rate 10 /cmd_vel_in geometry_msgs/msg/Twist "{linear: {x: 0.3}}"
+# 注入一条边界值消息
+ros2 topic pub --once /robot_status my_interfaces/msg/RobotStatus "{battery_percent: 100.0, mode: 2}"
+</script>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>用 launch_testing 自动检查话题内容、频率、QoS：<a href="../testing/03-integration-launch-testing.html">T3 集成测试</a>。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 你订阅了 Gazebo 发布的 <code>/camera/image_raw</code>，回调从来不触发，<code>ros2 topic echo</code> 却能看到数据，最可能的原因？</summary>

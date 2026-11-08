@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 9 章 Gazebo 仿真入门 · ROS2 中文教材</title>
+<title>第 9 章 Gazebo 仿真入门 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch09" data-root="../">
@@ -418,6 +418,29 @@ gz topic -l                      # 列出 gz 侧话题
 gz topic -e -t /odom             # 打印 gz 侧消息
 gz topic -t /cmd_vel -m gz.msgs.Twist -p "linear: {x: 0.3}"   # 绕过 ROS 直接控制
 </script>
+
+<h2>测试视角</h2>
+<p>仿真是机器人测试的主力环境：可以无人值守、批量重复、构造危险场景。但要清楚它的局限，并让它适合自动化运行。</p>
+<table>
+  <thead><tr><th>关注点</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>无界面运行</td><td>CI 中没有显示器，需要 <code>gz sim -s --headless-rendering</code>（T4.2）</td></tr>
+    <tr><td>仿真时间</td><td>所有节点都要 <code>use_sim_time:=true</code>；判定超时用仿真时间，不用墙钟时间</td></tr>
+    <tr><td>实时因子（RTF）</td><td>机器负载高时 RTF &lt; 1，仿真变慢；记录 RTF，帮助解释超时类失败</td></tr>
+    <tr><td>可重复性</td><td>物理引擎与传感器噪声带来随机性，同一场景要多次运行并统计成功率</td></tr>
+    <tr><td>仿真与现实差距</td><td>仿真通过不等于实机通过；仿真失败基本意味着实机也会失败</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+# 检查所有节点是否都使用仿真时间（漏设是 TF 外推错误的头号原因）
+for n in $(ros2 node list); do
+  echo "$n: $(ros2 param get "$n" use_sim_time 2>/dev/null | tail -1)"
+done
+</script>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>用 YAML 定义场景、自动判定、批量统计成功率：<a href="../testing/04-simulation-scenario.html">T4 仿真与场景测试</a>。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 为什么启动仿真时所有 ROS 节点都要设置 <code>use_sim_time: True</code>？</summary>

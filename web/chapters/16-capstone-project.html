@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 16 章 毕业项目：差速小车全栈 · ROS2 中文教材</title>
+<title>第 16 章 毕业项目：差速小车全栈 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch16" data-root="../">
@@ -448,6 +448,23 @@ def test_route_length():
 <div class="callout tip">
   <strong>恭喜完成全部课程</strong>
   <p>你已经掌握了 ROS2 的核心概念与主流工具链，并完成了一个完整的移动机器人项目。接下来最有效的成长方式是：读优秀开源项目的源码（Nav2、slam_toolbox、ros2_control_demos），给它们提 Issue 或 PR，并把你的项目部署到一台真实的机器人上。</p>
+</div>
+
+<h2>测试视角</h2>
+<p>16.5 的验收标准大多依靠人工观察（「RViz 观察」「服务调用 + 观察」）。作为测试工程师，下一步是把它们逐条变成可自动判定、可重复运行的测试：</p>
+<table>
+  <thead><tr><th>验收项</th><th>自动化方式</th><th>测试篇</th></tr></thead>
+  <tbody>
+    <tr><td>一键启动</td><td>launch 冒烟测试</td><td>T3</td></tr>
+    <tr><td>导航 10 次至少 9 次成功</td><td>场景库批量运行 + 成功率与置信下限</td><td>T4</td></tr>
+    <tr><td>连续 3 圈无失败</td><td>巡逻检查器监视 <code>/robot_status</code></td><td>T8</td></tr>
+    <tr><td><code>patrol/stop</code> 后 2 秒内停车</td><td>检查器调用服务并根据 <code>/odom</code> 测量停车时间</td><td>T8</td></tr>
+    <tr><td>录包内容完整</td><td>bag 不变量检查（限速、安全距离）</td><td>T5、T8</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>本章代码中藏着缺陷</strong>
+  <p><code>patrol_manager.py</code> 和 <code>route_utils.py</code> 中至少有两个缺陷：一个并发问题、一个边界值问题。手动演示时几乎不会遇到，在现场却可能造成「机器人在航点之间来回摆动」。试着先自己找一找，再阅读 <a href="../testing/08-test-capstone.html">T8 综合项目</a>，看测试如何把它们稳定复现出来。</p>
 </div>
 
 <h2>自查清单</h2>

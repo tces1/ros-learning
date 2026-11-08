@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 15 章 感知 Pipeline · ROS2 中文教材</title>
+<title>第 15 章 感知 Pipeline · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch15" data-root="../">
@@ -358,6 +358,30 @@ class YoloNode(Node):
 <div class="callout warn">
   <strong>推理耗时会阻塞回调</strong>
   <p>模型推理可能需要几十毫秒，订阅使用 depth=1 的传感器 QoS 处理最新帧即可，避免排队处理过期图像。需要更高性能时考虑 C++ + TensorRT / OpenVINO，或 NVIDIA Isaac ROS。</p>
+</div>
+
+<h2>测试视角</h2>
+<p>感知模块的测试是数据驱动的：输入是真实传感器数据，输出要和人工标注的真值或不变量比较。本章的 <code>safety_stop</code> 在测试篇中被反复用作例子，并发现了两个真实缺陷：</p>
+<table>
+  <thead><tr><th>缺陷</th><th>发现方法</th><th>章节</th></tr></thead>
+  <tbody>
+    <tr><td>启动后未收到雷达、或雷达中断时仍放行前进（失效时放行）</td><td>组件测试 + 集成测试</td><td>T2、T3</td></tr>
+    <tr><td>雷达角度范围为 0~2π 时，前方扇区的一半被漏掉</td><td>真实设备数据回放</td><td>T5</td></tr>
+  </tbody>
+</table>
+<table>
+  <thead><tr><th>维度</th><th>指标 / 检查</th></tr></thead>
+  <tbody>
+    <tr><td>检测质量</td><td>精确率、召回率（漏检对安全更致命）、定位误差；按场景（光照、距离、遮挡）分别统计</td></tr>
+    <tr><td>边界数据</td><td>NaN、inf、全 0、空数组、低于 range_min 的读数；过曝、全黑图像</td></tr>
+    <tr><td>同步</td><td>message_filters 的时间容差；某路传感器断流时是否整体停止输出</td></tr>
+    <tr><td>性能</td><td>单帧处理耗时、输出频率、端到端延迟（T6）</td></tr>
+    <tr><td>环境</td><td>玻璃、镜面、黑色物体、强光、细杆等错误推测用例（T7.5）</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>用 bag 做感知算法的基准对比回归和不变量检查：<a href="../testing/05-bag-replay.html">T5 数据回放测试</a>。</p>
 </div>
 
 <h2>自测题</h2>

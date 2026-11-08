@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 3 章 安装与第一个节点 · ROS2 中文教材</title>
+<title>第 3 章 安装与第一个节点 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch03" data-root="../">
@@ -427,6 +427,36 @@ colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     <tr><td><code>ros2 doctor</code></td><td>环境体检</td></tr>
   </tbody>
 </table>
+
+<h2>测试视角</h2>
+<p>测试中最隐蔽的错误之一是<strong>「测的不是你以为的那个版本」</strong>：忘记重新构建、忘记 source、终端里残留了旧的环境变量、系统中同时装了 apt 版本和源码版本。测试开始前先确认版本，是测试工程师的基本功。</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 pkg prefix my_first_nodes            # 实际使用的是哪个工作空间里的包
+echo $AMENT_PREFIX_PATH | tr ':' '\n'     # overlay 顺序：靠前的优先
+ros2 doctor --report > env_report.txt     # 记录发行版、中间件、网络等环境信息
+dpkg -l | grep ros-jazzy- | wc -l         # 已安装的 ROS 软件包数量
+</script>
+<h3>用 Docker 固定测试环境</h3>
+<p>「在我机器上是好的」在机器人项目中尤其常见。用容器把测试环境固定下来，任何人、任何 CI 机器上都能得到相同的结果：</p>
+<script type="text/plain" class="code" data-lang="text" data-file="Dockerfile.test">
+FROM osrf/ros:jazzy-desktop
+RUN apt-get update && apt-get install -y python3-pytest python3-hypothesis python3-psutil \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /ws
+COPY src/ src/
+RUN . /opt/ros/jazzy/setup.sh && apt-get update \
+    && rosdep install --from-paths src --ignore-src -r -y \
+    && colcon build --symlink-install
+CMD ["bash", "-c", ". install/setup.sh && colcon test && colcon test-result --verbose"]
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+docker build -f Dockerfile.test -t my_bot_test .
+docker run --rm my_bot_test
+</script>
+<div class="callout tip">
+  <strong>节点的退出也是测试项</strong>
+  <p>本章 talker 的 <code>main()</code> 处理了 <code>KeyboardInterrupt</code>，按 Ctrl+C 时干净退出。第 5 章的 <code>mode_server</code> 没有这样写，退出码非 0。<a href="../testing/03-integration-launch-testing.html">T3</a> 会用自动化测试发现这个问题。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 运行 <code>ros2 run my_first_nodes talker</code> 报 “Package 'my_first_nodes' not found”，可能原因？</summary>

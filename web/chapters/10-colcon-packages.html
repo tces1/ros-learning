@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 10 章 colcon 与包开发规范 · ROS2 中文教材</title>
+<title>第 10 章 colcon 与包开发规范 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch10" data-root="../">
@@ -303,6 +303,29 @@ rosbag2_*/
 <div class="callout tip">
   <strong>仓库放哪一层</strong>
   <p>通常把 <code>src/my_bot</code> 作为一个 Git 仓库，而不是整个 <code>ros2_ws</code>。工作空间是本地构建环境，不应提交。</p>
+</div>
+
+<h2>测试视角</h2>
+<p>本章是测试开发工作的「主场」：<code>colcon test</code> 是所有自动化测试的统一入口，CI 也是围绕它搭建的。</p>
+<script type="text/plain" class="code" data-lang="bash">
+colcon test --packages-select my_first_nodes --pytest-args -k safety -v   # 只跑名字含 safety 的 Python 用例
+colcon test --packages-select cpp_pubsub --ctest-args -R battery          # 只跑名字匹配的 CTest 用例
+colcon test --event-handlers console_direct+                              # 实时看到测试输出
+colcon test-result --all --verbose                                        # 汇总所有结果，包括通过的
+ls build/my_first_nodes/test_results/                                     # JUnit XML，CI 读取的就是它
+</script>
+<table>
+  <thead><tr><th>常见问题</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td><code>colcon test</code> 显示成功，实际有失败</td><td><code>colcon test</code> 的返回值不反映用例结果</td><td>CI 中必须再运行 <code>colcon test-result --verbose</code>，它在有失败时返回非 0</td></tr>
+    <tr><td>本地能测，CI 中导入失败</td><td>测试依赖没写 <code>test_depend</code></td><td>在干净容器中执行 rosdep + 测试（第 3 章测试视角中的 Dockerfile）</td></tr>
+    <tr><td>改了代码，测试结果不变</td><td>没有重新构建，或测试导入的是 install 中的旧版本</td><td>先 <code>colcon build</code> 再 <code>colcon test</code>；Python 包使用 <code>--symlink-install</code></td></tr>
+    <tr><td>lint 测试大量失败</td><td>自动生成的 flake8、pep257、copyright 检查</td><td>团队统一决定保留哪些；不要为了通过而整体删除</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>可测试的节点设计、组件测试、gmock、覆盖率：<a href="../testing/02-unit-component.html">T2</a>；分层 CI 流水线：<a href="../testing/08-test-capstone.html">T8</a>。</p>
 </div>
 
 <h2>自测题</h2>

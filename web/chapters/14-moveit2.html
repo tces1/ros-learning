@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 14 章 MoveIt 2 机械臂 · ROS2 中文教材</title>
+<title>第 14 章 MoveIt 2 机械臂 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch14" data-root="../">
@@ -276,6 +276,24 @@ ros2 launch moveit_setup_assistant setup_assistant.launch.py
     <tr><td>机械臂绕大圈</td><td>OMPL 随机性导致；增加规划时间与尝试次数、使用 Pilz PTP、或加路径约束</td></tr>
   </tbody>
 </table>
+
+<h2>测试视角</h2>
+<p>机械臂测试的方法与移动机器人相同：在仿真中批量运行、统计结果，再在实机上验证。差别在于指标：</p>
+<table>
+  <thead><tr><th>维度</th><th>指标 / 检查</th></tr></thead>
+  <tbody>
+    <tr><td>规划</td><td>规划成功率、规划耗时（p95）、轨迹长度与执行时间；同一请求多次规划结果的差异（采样规划器具有随机性）</td></tr>
+    <tr><td>笛卡尔路径</td><td><code>computeCartesianPath</code> 返回的完成比例（fraction），小于 1 时上层是否正确处理</td></tr>
+    <tr><td>碰撞</td><td>规划场景中的障碍是否与实物一致；靠近障碍的目标是否被正确拒绝</td></tr>
+    <tr><td>边界</td><td>工作空间边缘、奇异位形附近、关节限位附近的目标</td></tr>
+    <tr><td>重复定位精度</td><td>多次到达同一位姿的偏差（实机，用标定工具测量）</td></tr>
+    <tr><td>安全</td><td>速度 / 加速度缩放生效；急停后轨迹中止；协作场景的力与速度限制（ISO/TS 15066）</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>把本章的 move_demo 变成测试</strong>
+  <p>准备一组目标位姿（包括若干「应该失败」的：不可达、与障碍碰撞），循环调用 <code>plan()</code>，记录每次的成功与耗时，输出成功率和耗时分布。思路与 <a href="../testing/04-simulation-scenario.html">T4</a> 的场景执行器完全相同。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 为什么逆运动学可能有多个解？</summary>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 2 章 ROS2 系统架构 · ROS2 中文教材</title>
+<title>第 2 章 ROS2 系统架构 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch02" data-root="../">
@@ -235,6 +235,38 @@ ros2 component list
     <tr><td>一个进程多个节点</td><td>不支持（nodelet 除外）</td><td>支持</td></tr>
   </tbody>
 </table>
+
+<h2>测试视角</h2>
+<p>计算图就是系统的「接口清单」。测试工程师可以把它当作基线：每个版本保存一份计算图快照，与上一版本对比，任何没有在变更说明中出现的节点、话题、类型变化都值得追问。</p>
+<script type="text/plain" class="code" data-lang="bash" data-file="graph_snapshot.sh">
+#!/usr/bin/env bash
+# 用法：graph_snapshot.sh <输出文件>；在系统完整启动后运行
+OUT=${1:-graph.txt}
+{
+  echo "## nodes";    ros2 node list | sort
+  echo "## topics";   ros2 topic list -t | sort
+  echo "## services"; ros2 service list -t | sort
+  echo "## actions";  ros2 action list -t | sort
+} > "$OUT"
+echo "已保存到 $OUT"
+# 版本对比：diff graph_v1.2.txt graph_v1.3.txt
+</script>
+<table>
+  <thead><tr><th>本章概念</th><th>测试关注点</th></tr></thead>
+  <tbody>
+    <tr><td>DDS 发现 / Domain ID</td><td>测试之间、测试与他人系统之间的串扰；CI 中必须做域隔离（见 T3.6）</td></tr>
+    <tr><td>生命周期节点</td><td>每个合法状态转换是否成功；非法转换（如未 configure 就 activate）是否被拒绝；deactivate 后是否真的停止发布</td></tr>
+    <tr><td>组件与进程内通信</td><td>多个组件在同一进程中时，一个组件崩溃会带走整个进程；故障注入时要按「进程」而不是「节点」考虑影响范围</td></tr>
+    <tr><td>命名空间与重映射</td><td>多机器人场景下话题是否串到别的机器人；快照对比能快速发现漏加命名空间的话题</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+# 生命周期节点的状态转换测试（以 Nav2 的 map_server 为例）
+ros2 lifecycle get /map_server
+ros2 lifecycle set /map_server activate      # 在 unconfigured 状态下应失败
+ros2 lifecycle set /map_server configure
+ros2 lifecycle set /map_server activate
+</script>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. 节点 <code>/arm/gripper</code> 发布话题 <code>~/state</code>、<code>state</code> 和 <code>/state</code>，完整名称分别是什么？</summary>

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T1 机器人测试岗位与测试体系 · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t01" data-root="../">
+<main class="content">
+
+<h1>T1　机器人测试岗位与测试体系</h1>
+<p class="lead">机器人测试不是「把软件测试搬到机器人上」。被测系统有物理运动、传感器噪声、时间敏感性和安全风险。本篇先建立全局认识：机器人测试工程师测什么、在哪里测、怎么分层，以及 ROS2 生态里有哪些测试工具。</p>
+<div class="meta-bar"><span class="tag">阅读约 1 小时</span><span class="tag">测试篇</span><span class="tag">建议与第 1–3 章同周学习</span></div>
+
+<h2>本篇目标</h2>
+<ul>
+  <li>说清机器人测试和 Web / 后端测试的关键差异</li>
+  <li>掌握机器人测试的分层：单元、组件、集成、仿真、回放、台架、实机、现场</li>
+  <li>知道每一层在 ROS2 中用什么工具实现</li>
+  <li>了解机器人测试岗位的职责和常见质量指标</li>
+</ul>
+
+<h2>T1.1 机器人测试有什么不同</h2>
+<table>
+  <thead><tr><th>维度</th><th>Web / 后端系统</th><th>ROS2 机器人系统</th><th>对测试的影响</th></tr></thead>
+  <tbody>
+    <tr><td>输入</td><td>确定的请求</td><td>有噪声的传感器数据，每次都不一样</td><td>判定不能要求「完全相等」，要用容差、统计和不变量</td></tr>
+    <tr><td>输出</td><td>数据、页面</td><td>速度、力矩，最终变成物理运动</td><td>错误可能造成碰撞和伤害，实机测试必须有安全措施</td></tr>
+    <tr><td>时间</td><td>大多与时间无关</td><td>控制回路要求固定频率，数据要按时间戳对齐</td><td>延迟、抖动、时钟（仿真时间 / 系统时间）本身就是测试对象</td></tr>
+    <tr><td>并发</td><td>请求级并发</td><td>几十个进程、上百个话题异步通信</td><td>启动顺序、竞态、丢消息、QoS 不匹配是高频缺陷</td></tr>
+    <tr><td>环境</td><td>服务器环境相对固定</td><td>光照、地面、障碍物、网络千变万化</td><td>需要「环境矩阵」和大量场景，仿真无法完全替代实机</td></tr>
+    <tr><td>复现</td><td>日志 + 请求即可复现</td><td>同样的操作在现场可能 10 次出 1 次问题</td><td>必须录包（rosbag）；结论要用成功率表达</td></tr>
+    <tr><td>结果判定</td><td>断言返回值</td><td>「到达了吗？」「离障碍物多近？」「算安全吗？」</td><td>测试预言（oracle）的设计本身是难点</td></tr>
+  </tbody>
+</table>
+<div class="callout note">
+  <strong>测试预言（test oracle）</strong>
+  <p>判断一次测试「通过还是失败」的依据。对一个排序函数，预言是「输出有序」；对导航，预言可能是「60 秒内到达目标 0.25 m 范围内，全程与障碍物距离不小于 0.15 m」。机器人测试中，写出可量化、可自动判定的预言往往比写测试代码更难，也更有价值。</p>
+</div>
+
+<h2>T1.2 测试分层：从代码到现场</h2>
+<p>经典的「测试金字塔」在机器人领域扩展成下面这样。越往下越快、越便宜、越稳定；越往上越真实、越贵、越慢。</p>
+<pre class="diagram">
+                    ▲ 真实度高、成本高、慢、结果有波动
+                    │
+   L7 现场测试       │  客户真实场地，真实任务，长时间运行
+   L6 实机测试       │  实验室 / 测试场中的真机，按用例执行
+   L5 台架测试 HIL   │  真实控制器 + 真实电机 / 传感器，车轮架空
+   L4 回放测试       │  用录制的真实传感器数据驱动软件（rosbag）
+   L3 仿真场景测试   │  Gazebo 中跑完整软件栈，批量场景
+   L2 集成测试       │  启动多个真实节点，黑盒验证话题 / 服务（launch_testing）
+   L1 组件测试       │  在测试进程内创建节点，直接调用回调或用假依赖
+   L0 单元测试       │  纯函数、纯类，不依赖 ROS（pytest / gtest）
+                    │
+                    ▼ 快、便宜、确定性高、每次提交都跑
+</pre>
+<table>
+  <thead><tr><th>层级</th><th>典型耗时</th><th>运行频率</th><th>能发现的缺陷</th><th>本教材</th></tr></thead>
+  <tbody>
+    <tr><td>L0 单元</td><td>毫秒</td><td>每次提交</td><td>算法错误、边界条件、角度归一化、单位换算</td><td>第 10 章、T2</td></tr>
+    <tr><td>L1 组件</td><td>秒</td><td>每次提交</td><td>回调逻辑、状态机、参数处理、错误处理</td><td>T2</td></tr>
+    <tr><td>L2 集成</td><td>十几秒</td><td>每次提交</td><td>话题名 / 类型 / QoS 不匹配、启动失败、退出异常、接口契约</td><td>T3</td></tr>
+    <tr><td>L3 仿真场景</td><td>分钟</td><td>每晚 / 合并前</td><td>导航失败、碰撞、卡死、参数调优退化、TF 问题</td><td>T4</td></tr>
+    <tr><td>L4 回放</td><td>分钟</td><td>每晚 / 修复缺陷时</td><td>真实数据下的感知 / 定位问题，现场问题复现</td><td>T5</td></tr>
+    <tr><td>L5 台架</td><td>小时</td><td>版本发布前</td><td>驱动、通信、实时性、硬件时序</td><td>T7</td></tr>
+    <tr><td>L6 实机</td><td>小时到天</td><td>版本发布前</td><td>动力学、传感器特性、仿真与现实差距</td><td>T7</td></tr>
+    <tr><td>L7 现场</td><td>天到周</td><td>交付 / 试点</td><td>环境多样性、长期稳定性、人机交互</td><td>T7</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>测试左移</strong>
+  <p>每个在实机上发现的缺陷，都应该问一句：「能不能在更低的层级抓住它？」能的话就补一个低层测试。例如现场发现「雷达数据中有 NaN 时节点崩溃」，修复后应补一个 L0 单元测试和一个 L4 回放测试。这样同样的问题以后在提交代码时就会被拦住。</p>
+</div>
+
+<h2>T1.3 SIL、HIL 与实机</h2>
+<table>
+  <thead><tr><th>名称</th><th>全称</th><th>含义</th><th>ROS2 中的实现</th></tr></thead>
+  <tbody>
+    <tr><td>MIL</td><td>Model-in-the-Loop</td><td>用数学模型验证算法（常见于控制算法）</td><td>Python / MATLAB 脚本，或单元测试中的简化模型</td></tr>
+    <tr><td>SIL</td><td>Software-in-the-Loop</td><td>真实软件 + 仿真环境</td><td>Gazebo + 全部 ROS2 节点（T4）；bag 回放（T5）</td></tr>
+    <tr><td>HIL</td><td>Hardware-in-the-Loop</td><td>真实控制硬件 + 仿真或台架负载</td><td>真实工控机 / 驱动板 + 架空的电机，或仿真器通过真实总线发数据（T7）</td></tr>
+    <tr><td>实机</td><td>Vehicle / Robot test</td><td>整机在真实环境运行</td><td>按测试计划执行用例并录包（T7）</td></tr>
+  </tbody>
+</table>
+
+<h2>T1.4 ROS2 测试工具链全景</h2>
+<table>
+  <thead><tr><th>用途</th><th>工具</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>构建与运行测试</td><td><code>colcon test</code>、<code>colcon test-result</code></td><td>统一入口，结果输出为 JUnit XML，CI 直接可读</td></tr>
+    <tr><td>Python 单元 / 组件测试</td><td>pytest、unittest、hypothesis</td><td><code>ament_python</code> 包的默认测试框架</td></tr>
+    <tr><td>C++ 单元 / 组件测试</td><td>gtest、gmock（<code>ament_cmake_gtest</code> / <code>ament_cmake_gmock</code>）</td><td>CMake 中用 <code>ament_add_gtest</code> 注册</td></tr>
+    <tr><td>集成测试</td><td>launch_testing、launch_pytest</td><td>用 launch 启动被测节点，在测试中断言输出、话题、退出码</td></tr>
+    <tr><td>静态检查</td><td>ament_lint（flake8、cpplint、uncrustify、xmllint 等）</td><td>ros2 pkg create 生成的包默认带上</td></tr>
+    <tr><td>覆盖率</td><td>pytest-cov、gcov / lcov、colcon-lcov-result</td><td>衡量测试覆盖了多少代码</td></tr>
+    <tr><td>仿真</td><td>Gazebo（ros_gz）、Isaac Sim 等</td><td>可无界面运行，适合 CI</td></tr>
+    <tr><td>数据录制与回放</td><td>rosbag2（MCAP 格式）、rosbag2_py</td><td>复现与回归的基础</td></tr>
+    <tr><td>可视化分析</td><td>RViz、rqt、PlotJuggler、Foxglove</td><td>查看 bag、绘制曲线、定位问题</td></tr>
+    <tr><td>性能</td><td><code>ros2 topic hz/bw/delay</code>、ros2_tracing、top / pidstat、psutil</td><td>频率、延迟、资源占用</td></tr>
+    <tr><td>诊断</td><td><code>ros2 doctor</code>、diagnostic_updater、<code>/diagnostics</code></td><td>系统健康检查，现场排查第一步</td></tr>
+    <tr><td>CI</td><td>GitHub Actions + ros-tooling/action-ros-ci、GitLab CI、Jenkins</td><td>把上面所有测试串起来自动运行</td></tr>
+  </tbody>
+</table>
+
+<h2>T1.5 一个缺陷从现场到回归测试的生命周期</h2>
+<pre class="diagram">
+ 现场：机器人在走廊转角处停住不动（10 次中出现 2 次）
+   │
+   ├─ 1. 记录：时间点、软件版本（git SHA）、参数、地图，导出事故前后 60 s 的 bag
+   ├─ 2. 分析：PlotJuggler / Foxglove 看 /cmd_vel、/scan、代价地图、行为树日志
+   ├─ 3. 复现：本地用 bag 回放（T5）或在仿真中搭出相同转角（T4）
+   ├─ 4. 定位：开发修复（例如局部代价地图膨胀半径过大）
+   ├─ 5. 回归测试：把场景加入仿真场景库 / 把 bag 加入回放回归集
+   └─ 6. 验证：仿真 20 次 + 实机 10 次，成功率达到准入标准后关闭缺陷
+</pre>
+
+<h2>T1.6 常用质量指标</h2>
+<table>
+  <thead><tr><th>指标</th><th>定义</th><th>典型用途</th></tr></thead>
+  <tbody>
+    <tr><td>任务成功率</td><td>成功次数 / 总次数</td><td>导航、抓取等任务级验收</td></tr>
+    <tr><td>MDBF</td><td>平均故障间隔里程（Mean Distance Between Failures）</td><td>移动机器人可靠性</td></tr>
+    <tr><td>MTBF</td><td>平均故障间隔时间</td><td>长期运行稳定性</td></tr>
+    <tr><td>人工干预率</td><td>每小时（或每公里）需要人工接管的次数</td><td>自主性评估</td></tr>
+    <tr><td>定位误差</td><td>估计位姿与真值的距离和角度差</td><td>定位模块验收</td></tr>
+    <tr><td>到点精度</td><td>到达后与目标位姿的偏差</td><td>导航、对接充电</td></tr>
+    <tr><td>端到端延迟</td><td>传感器数据产生到控制指令发出的时间</td><td>避障响应能力</td></tr>
+    <tr><td>话题频率与抖动</td><td>实际发布频率、间隔的标准差</td><td>传感器、控制回路健康度</td></tr>
+    <tr><td>资源占用</td><td>CPU、内存、内存增长斜率</td><td>长稳测试、硬件选型</td></tr>
+    <tr><td>缺陷逃逸率</td><td>在更高层级（尤其现场）才发现的缺陷占比</td><td>衡量测试体系本身的有效性</td></tr>
+  </tbody>
+</table>
+
+<h2>T1.7 机器人测试工程师的职责</h2>
+<table>
+  <thead><tr><th>方向</th><th>主要工作</th><th>开发背景的优势</th></tr></thead>
+  <tbody>
+    <tr><td>测试开发</td><td>搭建测试框架、编写自动化测试、维护 CI、开发仿真场景和数据分析工具</td><td>直接复用编程能力；能读懂被测代码，写出更有针对性的测试</td></tr>
+    <tr><td>系统 / 集成测试</td><td>整机功能验证、版本验收、回归测试、性能与长稳</td><td>能看懂日志和源码，定位问题更快</td></tr>
+    <tr><td>实机 / 现场测试</td><td>制定测试计划，执行实机用例，管理测试场地和安全，收集现场数据</td><td>能写脚本自动化数据采集和分析</td></tr>
+    <tr><td>质量与流程</td><td>测试策略、准入准出标准、缺陷管理、质量度量</td><td>理解开发流程，能推动测试左移</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>有开发经验的人最容易忽略的三件事</strong>
+  <p>1）<strong>统计思维</strong>：机器人测试结论几乎都是「成功率 x%（n 次）」，跑一次成功不代表没问题。2）<strong>安全意识</strong>：实机测试前先验证急停，再验证功能。3）<strong>数据意识</strong>：没有录包的失败几乎无法分析，「先录包再测试」要成为肌肉记忆。</p>
+</div>
+
+<h2>T1.8 测试篇的主线项目</h2>
+<p>测试篇的例子全部基于前面章节写过的代码，你不需要额外准备被测系统：</p>
+<table>
+  <thead><tr><th>被测对象</th><th>来自</th><th>在测试篇中的用途</th></tr></thead>
+  <tbody>
+    <tr><td><code>motion_utils</code>、<code>route_utils</code></td><td>第 10、16 章</td><td>单元测试、性质测试（T2）</td></tr>
+    <tr><td><code>mode_server</code>（服务）</td><td>第 5 章</td><td>组件测试、接口契约测试（T2、T3）</td></tr>
+    <tr><td><code>safety_stop</code>（雷达安全停车）</td><td>第 15 章</td><td>组件测试、集成测试、回放测试；发现「失效时放行」类安全缺陷（T2、T3、T5）</td></tr>
+    <tr><td>仿真小车 + Nav2</td><td>第 9、13 章</td><td>仿真场景测试、性能测试（T4、T6）</td></tr>
+    <tr><td><code>patrol_manager</code>（巡逻管理）</td><td>第 16 章</td><td>依赖注入与假导航器、并发缺陷、完整测试体系（T8）</td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么机器人测试的结论通常要写成「成功率」而不是「通过 / 不通过」？</summary>
+<div>传感器噪声、时序、仿真物理引擎的随机性都会让同一个用例的结果有波动。只跑一次无法区分「必然成功」和「碰巧成功」，需要重复 n 次并报告成功率，必要时给出置信区间（见 T7）。</div></details>
+<details class="quiz"><summary>2. 现场发现「雷达偶发全 0 数据导致机器人急停」，修复后应在哪些层级补测试？</summary>
+<div>L0：对处理雷达数据的函数补边界用例（全 0、NaN、inf）；L4：把现场 bag 中出问题的片段加入回放回归集；必要时 L3：在仿真中注入异常雷达数据。目标是以后同类问题在提交代码阶段就被拦住。</div></details>
+<details class="quiz"><summary>3. SIL 和 HIL 的区别是什么？</summary>
+<div>SIL 中所有软件运行在普通电脑上，环境和硬件由仿真提供；HIL 中使用真实的控制硬件（工控机、驱动板、传感器等），只有部分环境或负载是仿真或台架提供的，能发现驱动、总线、实时性相关的问题。</div></details>
+<details class="quiz"><summary>4. 给「点到点导航」写一个可自动判定的测试预言。</summary>
+<div>示例：Nav2 返回 SUCCEEDED；用时 ≤ 60 s；终点位置误差 ≤ 0.25 m、朝向误差 ≤ 0.3 rad；全程雷达最近距离 ≥ 0.15 m；全程没有超过 5 s 的「速度为 0 且未到达」状态。每一项都能从话题数据中自动计算。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能说出机器人测试和 Web 测试的至少 5 个差异</li>
+  <li>能画出 L0–L7 测试分层，并说出每层的工具</li>
+  <li>理解测试预言的概念，能为一个导航任务写出量化判定标准</li>
+  <li>知道 MDBF、人工干预率、端到端延迟等指标的含义</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

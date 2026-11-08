@@ -19,6 +19,14 @@
     { id: 'ch14', file: 'chapters/14-moveit2.html', title: '14. MoveIt 2 机械臂', group: '第五部分 · 高级应用', desc: '运动学、规划、场景碰撞、MoveGroupInterface 编程', kw: 'moveit 机械臂 运动规划 ik 逆解 planning scene move_group ompl 笛卡尔 servo' },
     { id: 'ch15', file: 'chapters/15-perception.html', title: '15. 感知 Pipeline', group: '第五部分 · 高级应用', desc: '相机与 OpenCV、标定、点云处理、多传感器同步', kw: 'camera 相机 图像 cv_bridge opencv 点云 pointcloud2 标定 message_filters 深度' },
     { id: 'ch16', file: 'chapters/16-capstone-project.html', title: '16. 毕业项目：差速小车全栈', group: '第六部分 · 综合实战', desc: '从 URDF 到 SLAM 到多航点导航的完整项目', kw: 'capstone 毕业 项目 slam nav2 航点 综合' },
+    { id: 't01', file: 'testing/01-test-overview.html', title: 'T1. 机器人测试岗位与测试体系', group: '第七部分 · 机器人测试', desc: '测什么、在哪测、怎么分层，ROS2 测试工具链全景', kw: '测试 岗位 测试金字塔 sil hil 现场 质量 指标 工具链 职责' },
+    { id: 't02', file: 'testing/02-unit-component.html', title: 'T2. 单元与组件测试', group: '第七部分 · 机器人测试', desc: 'pytest / gtest / gmock、可测试的节点设计、覆盖率', kw: '单元测试 组件测试 pytest gtest gmock mock fixture 覆盖率 coverage hypothesis 依赖注入' },
+    { id: 't03', file: 'testing/03-integration-launch-testing.html', title: 'T3. 集成测试：launch_testing', group: '第七部分 · 机器人测试', desc: '启动真实节点做黑盒测试：话题、服务、QoS、退出码', kw: '集成测试 launch_testing launch_test 黑盒 话题 服务 qos 退出码 proc_output 隔离 domain' },
+    { id: 't04', file: 'testing/04-simulation-scenario.html', title: 'T4. 仿真与场景测试', group: '第七部分 · 机器人测试', desc: '无界面 Gazebo、场景定义、判定准则、成功率统计', kw: '仿真测试 场景 scenario headless gazebo nav2 判定 oracle 成功率 flaky 回归' },
+    { id: 't05', file: 'testing/05-bag-replay.html', title: 'T5. 数据回放测试', group: '第七部分 · 机器人测试', desc: '用 rosbag2 复现问题、做回归测试和不变量检查', kw: 'rosbag 回放 replay 回归 复现 golden 不变量 rosbag2_py 黑匣子 snapshot 裁剪' },
+    { id: 't06', file: 'testing/06-performance-stability.html', title: 'T6. 性能与稳定性测试', group: '第七部分 · 机器人测试', desc: '频率、延迟、资源占用、长稳测试与故障注入', kw: '性能 延迟 latency 频率 jitter cpu 内存 泄漏 长稳 soak 故障注入 netem stress tracing' },
+    { id: 't07', file: 'testing/07-field-testing.html', title: 'T7. 实机与现场测试', group: '第七部分 · 机器人测试', desc: '测试计划、用例设计、安全规程、缺陷报告与指标', kw: '实机 现场 hil 台架 安全 急停 测试计划 用例设计 缺陷报告 mdbf 成功率 验收' },
+    { id: 't08', file: 'testing/08-test-capstone.html', title: 'T8. 综合项目：为巡逻小车建测试体系', group: '第七部分 · 机器人测试', desc: '把 T1–T7 用在第 16 章项目上，产出测试报告', kw: '综合 项目 测试体系 巡逻 ci 流水线 测试报告 缺陷' },
     { id: 'ex', file: 'exercises.html', title: '动手练习（含参考答案）', group: '练习与附录', kw: '练习 作业 答案 实验' },
     { id: 'faq', file: 'appendix/troubleshooting.html', title: '附录 A：常见问题排查', group: '练习与附录', kw: '报错 排查 faq 问题 错误 not found' },
     { id: 'ros1', file: 'appendix/ros1-cheatsheet.html', title: '附录 B：ROS1 ↔ ROS2 对照', group: '练习与附录', kw: 'ros1 迁移 catkin rospy roscpp noetic' },
@@ -169,7 +177,7 @@
     var menuBtn = el('button', { 'class': 'btn menu-btn', type: 'button' }, '目录');
     menuBtn.addEventListener('click', function () { document.body.classList.toggle('nav-open'); });
     top.appendChild(menuBtn);
-    top.appendChild(el('a', { 'class': 'brand', href: root + 'index.html' }, '<span>ROS2</span> 中文教材'));
+    top.appendChild(el('a', { 'class': 'brand', href: root + 'index.html' }, '<span>ROS2</span> 机器人测试教材'));
     top.appendChild(el('div', { 'class': 'topbar-spacer' }));
     top.appendChild(el('span', { 'class': 'progress-mini', id: 'progress-mini' }));
     var themeBtn = el('button', { 'class': 'btn', type: 'button' }, theme === 'dark' ? '浅色模式' : '深色模式');
@@ -183,7 +191,7 @@
 
     var layout = el('div', { 'class': 'layout' });
     var side = el('nav', { 'class': 'sidebar' });
-    var search = el('input', { 'class': 'search', type: 'search', placeholder: '搜索章节或关键词，如 qos、tf、nav2' });
+    var search = el('input', { 'class': 'search', type: 'search', placeholder: '搜索章节或关键词，如 qos、launch_testing、回放' });
     var list = el('div', { 'class': 'nav-list' });
     side.appendChild(search);
     side.appendChild(list);
@@ -299,7 +307,7 @@
     wrap.appendChild(pager);
   }
 
-  function chapters() { return PAGES.filter(function (p) { return /^ch\d+$/.test(p.id); }); }
+  function chapters() { return PAGES.filter(function (p) { return /^(ch|t)\d+$/.test(p.id); }); }
 
   function updateProgress() {
     var chs = chapters();
@@ -316,13 +324,16 @@
 
   /* ---------- home cards ---------- */
   function renderCards() {
-    var grid = document.getElementById('chapter-cards');
-    if (!grid) return;
+    var grids = { ch: document.getElementById('chapter-cards'), t: document.getElementById('testing-cards') };
     chapters().forEach(function (p) {
+      var kind = p.id.charAt(0) === 't' ? 't' : 'ch';
+      var grid = grids[kind] || grids.ch;
+      if (!grid) return;
       var n = p.title.split('.')[0];
+      var label = kind === 't' ? '测试篇 ' + n : '第 ' + n + ' 章 · ' + esc(p.group.split('·')[1] || '');
       var a = el('a', { 'class': 'card', href: root + p.file, 'data-id': p.id });
-      a.innerHTML = '<div class="card-num">第 ' + n + ' 章 · ' + esc(p.group.split('·')[1] || '') + '</div>' +
-        '<div class="card-title">' + esc(p.title.replace(/^\d+\.\s*/, '')) + '</div>' +
+      a.innerHTML = '<div class="card-num">' + label + '</div>' +
+        '<div class="card-title">' + esc(p.title.replace(/^T?\d+\.\s*/, '')) + '</div>' +
         '<div class="card-desc">' + esc(p.desc || '') + '</div>';
       grid.appendChild(a);
     });

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 12 章 ros2_control · ROS2 中文教材</title>
+<title>第 12 章 ros2_control · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch12" data-root="../">
@@ -333,6 +333,29 @@ PLUGINLIB_EXPORT_CLASS(my_bot_hardware::MyBotSystem, hardware_interface::SystemI
 <div class="callout danger">
   <strong>read() / write() 运行在实时循环中</strong>
   <p>不要在其中分配内存、打印大量日志或做阻塞 I/O（如等待串口回复超过一个周期）。串口通信通常放到独立线程，read/write 只交换缓存数据。</p>
+</div>
+
+<h2>测试视角</h2>
+<p>ros2_control 处在软件与硬件的交界处，是安全相关缺陷最集中的地方之一。</p>
+<table>
+  <thead><tr><th>测试点</th><th>方法</th><th>期望</th></tr></thead>
+  <tbody>
+    <tr><td>无硬件测试控制器</td><td>使用 <code>mock_components/GenericSystem</code> 作为硬件</td><td>控制器加载、激活、指令与状态接口正常；可在 CI 中运行</td></tr>
+    <tr><td>指令超时</td><td>持续发送速度后停止发送</td><td><code>diff_drive_controller</code> 在 <code>cmd_vel_timeout</code> 内输出零速</td></tr>
+    <tr><td>速度 / 加速度限制</td><td>发送超过限制的指令</td><td>输出被限制；加速度平滑</td></tr>
+    <tr><td>控制器切换</td><td>运行中停用、切换控制器</td><td>切换期间不产生突变指令</td></tr>
+    <tr><td>硬件通信异常</td><td>在台架上断开驱动通信（T7.3）</td><td>硬件接口报错、控制器停止，不执行旧指令</td></tr>
+    <tr><td>控制频率</td><td>controller_manager 的 <code>update_rate</code> 与实际周期</td><td>满负载下周期抖动在要求范围内（T6）</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 control list_controllers                 # 各控制器状态：active / inactive
+ros2 control list_hardware_interfaces         # 指令 / 状态接口是否都已认领
+ros2 param get /diff_drive_controller cmd_vel_timeout
+</script>
+<div class="callout danger">
+  <strong>指令超时必须验证</strong>
+  <p>上游节点崩溃或网络中断时，如果底盘继续执行最后一条速度指令，机器人会失控。这是实机测试前必须在台架上验证的项目，详见 <a href="../testing/06-performance-stability.html">T6 故障注入</a> 和 <a href="../testing/07-field-testing.html">T7 台架测试</a>。</p>
 </div>
 
 <h2>自测题</h2>

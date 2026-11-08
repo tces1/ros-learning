@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T3 集成测试：launch_testing · ROS2 机器人测试教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="t03" data-root="../">
+<main class="content">
+
+<h1>T3　集成测试：launch_testing</h1>
+<p class="lead">组件测试在一个进程内验证逻辑；集成测试则像用户一样，把真实的节点作为独立进程启动，只通过话题、服务和参数与它交互。launch_testing 是 ROS2 官方的集成测试框架，能接入 <code>colcon test</code>，是机器人 CI 中最重要的一层。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">测试篇</span><span class="tag">前置：第 6 章、T2</span></div>
+
+<h2>本篇目标</h2>
+<ul>
+  <li>理解 launch_testing 的结构：启动描述、活动测试、关闭后测试</li>
+  <li>断言进程输出、话题内容与频率、服务行为、退出码</li>
+  <li>对 safety_stop 做黑盒测试，并验证接口契约（话题类型、QoS）</li>
+  <li>对 launch 文件做冒烟测试，验证启动参数生效</li>
+  <li>掌握测试隔离与消除不稳定测试的方法</li>
+</ul>
+
+<h2>T3.1 launch_testing 的结构</h2>
+<pre class="diagram">
+ test_xxx_launch.py
+ ├─ generate_test_description()      ① 用 launch 描述「被测系统」：启动哪些节点、什么参数
+ │     └─ ReadyToTest()                  所有进程启动后，开始运行测试
+ ├─ class TestActive(unittest.TestCase)  ② 活动测试：被测节点运行期间执行
+ │     └─ 可注入 proc_output、proc_info、以及 ① 返回的字典中的对象
+ └─ @post_shutdown_test()               ③ 关闭后测试：所有进程退出后执行
+       class TestAfter(unittest.TestCase)    典型用途：检查退出码
+</pre>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-launch-testing ros-jazzy-launch-testing-ros ros-jazzy-launch-testing-ament-cmake
+</script>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_first_nodes/package.xml（追加测试依赖）">
+<test_depend>launch</test_depend>
+<test_depend>launch_ros</test_depend>
+<test_depend>launch_testing</test_depend>
+<test_depend>python3-pytest</test_depend>
+</script>
+<p>在 <code>ament_python</code> 包中，launch 测试文件放在 <code>test/</code> 目录，文件名以 <code>test_</code> 开头并带 <code>@pytest.mark.launch_test</code> 标记，<code>colcon test</code> 会通过 launch_testing 的 pytest 插件自动运行它。在 <code>ament_cmake</code> 包中则需要在 CMakeLists.txt 中注册（见 T3.7）。</p>
+
+<h2>T3.2 第一个集成测试：进程输出与退出码</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_talker_launch.py">
+import unittest
+
+import launch
+import launch_ros.actions
+import launch_testing.actions
+import launch_testing.asserts
+import pytest
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    talker = launch_ros.actions.Node(
+        package='my_first_nodes', executable='talker', output='screen')
+    return launch.LaunchDescription([
+        talker,
+        launch_testing.actions.ReadyToTest(),
+    ]), {'talker': talker}            # 字典中的对象可以注入测试方法的参数
+
+
+class TestTalkerOutput(unittest.TestCase):
+
+    def test_logs_publishing(self, proc_output, talker):
+        # 在 10 秒内等待输出中出现指定文本，否则失败
+        proc_output.assertWaitFor('Hello ROS2 #2', process=talker, timeout=10)
+
+
+@launch_testing.post_shutdown_test()
+class TestTalkerShutdown(unittest.TestCase):
+
+    def test_exit_code(self, proc_info):
+        # 测试结束时 launch 向进程发送 SIGINT，进程应以 0 正常退出
+        launch_testing.asserts.assertExitCodes(proc_info)
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws
+colcon build --packages-select my_first_nodes --symlink-install
+colcon test --packages-select my_first_nodes --event-handlers console_direct+
+colcon test-result --verbose
+
+# 调试时可以单独运行一个 launch 测试文件
+source install/setup.bash
+launch_test src/my_first_nodes/test/test_talker_launch.py
+</script>
+
+<h3>退出码测试发现的缺陷</h3>
+<p>把上面的 <code>talker</code> 换成第 5 章的 <code>mode_server</code> 再跑一次，关闭后测试会失败：<code>mode_server</code> 的 <code>main()</code> 没有处理 Ctrl+C，收到 SIGINT 时抛出未捕获的异常并以非 0 退出码结束。</p>
+<p>这看起来只是「退出时多了一段报错」，但在真实系统中会造成：launch 把它当成异常退出处理（可能触发 <code>on_exit</code> 关闭整个系统或重启）；退出时没有执行清理（没有停止电机、没有关闭文件，录包可能不完整）；日志里充满无关报错，掩盖真正的问题。修复方式是统一使用下面的入口写法：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="推荐的节点入口写法">
+import rclpy
+from rclpy.executors import ExternalShutdownException
+
+
+def main():
+    rclpy.init()
+    node = ModeServer()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+</script>
+<div class="callout tip">
+  <strong>把「优雅退出」写进准入标准</strong>
+  <p>团队里可以约定：每个节点都必须有一个 launch 测试，至少包含「启动后 N 秒内未崩溃」和「SIGINT 后退出码为 0」两项。成本很低，却能拦住大量启动崩溃和退出异常问题。</p>
+</div>
+
+<h2>T3.3 断言话题内容与频率</h2>
+<p>在活动测试中创建一个「探针」节点，像外部观察者一样订阅被测节点的输出：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_talker_topic_launch.py">
+import re
+import time
+import unittest
+
+import launch
+import launch_ros.actions
+import launch_testing.actions
+import pytest
+import rclpy
+from std_msgs.msg import String
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    return launch.LaunchDescription([
+        launch_ros.actions.Node(package='my_first_nodes', executable='talker'),
+        launch_testing.actions.ReadyToTest(),
+    ])
+
+
+class TestChatterTopic(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        rclpy.init()
+        cls.node = rclpy.create_node('chatter_probe')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.node.destroy_node()
+        rclpy.shutdown()
+
+    def collect(self, count, timeout):
+        stamps, texts = [], []
+
+        def on_msg(msg):
+            stamps.append(time.monotonic())
+            texts.append(msg.data)
+
+        sub = self.node.create_subscription(String, 'chatter', on_msg, 10)
+        try:
+            end = time.monotonic() + timeout
+            while time.monotonic() < end and len(texts) < count:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+        finally:
+            self.node.destroy_subscription(sub)
+        return stamps, texts
+
+    def test_format_sequence_and_rate(self):
+        stamps, texts = self.collect(count=8, timeout=15.0)
+        self.assertGreaterEqual(len(texts), 8, f'只收到 {len(texts)} 条消息')
+
+        for t in texts:
+            self.assertRegex(t, r'^Hello ROS2 #\d+$')
+
+        nums = [int(re.search(r'#(\d+)', t).group(1)) for t in texts]
+        self.assertEqual(nums, list(range(nums[0], nums[0] + len(nums))), '序号不连续，可能丢消息')
+
+        intervals = [b - a for a, b in zip(stamps, stamps[1:])]
+        mean = sum(intervals) / len(intervals)
+        self.assertAlmostEqual(mean, 0.5, delta=0.1, msg=f'平均间隔 {mean:.3f} s')
+</script>
+<div class="callout note">
+  <strong>为什么不检查第一条消息是 #0</strong>
+  <p>探针节点启动、完成发现需要时间，可能错过开头几条消息（默认 QoS 不保存历史）。测试应该只断言「从开始收到起，序号连续」。如果业务确实要求新订阅者拿到最新状态，那应该在被测节点上使用 <code>TRANSIENT_LOCAL</code> QoS，并单独测试这一点。</p>
+</div>
+
+<h2>T3.4 黑盒测试：safety_stop</h2>
+<p>T2 中我们直接调用了回调。现在把 safety_stop 作为独立进程启动，只通过 <code>/scan</code>、<code>/cmd_vel_in</code> 输入、<code>/cmd_vel</code> 输出与它交互，同时验证接口契约：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_safety_stop_launch.py">
+import math
+import time
+import unittest
+
+import launch
+import launch_ros.actions
+import launch_testing.actions
+import launch_testing.asserts
+import pytest
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.qos import ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    safety = launch_ros.actions.Node(
+        package='my_first_nodes', executable='safety_stop',
+        parameters=[{'stop_distance': 0.4, 'half_angle_deg': 30.0}])
+    return launch.LaunchDescription([
+        safety, launch_testing.actions.ReadyToTest()
+    ]), {'safety': safety}
+
+
+def make_scan(front_distance, n=360):
+    scan = LaserScan()
+    scan.header.frame_id = 'laser_link'
+    scan.angle_min = -math.pi
+    scan.angle_increment = 2 * math.pi / n
+    scan.angle_max = scan.angle_min + scan.angle_increment * (n - 1)
+    scan.range_min, scan.range_max = 0.12, 10.0
+    ranges = [5.0] * n
+    ranges[n // 2] = front_distance          # 索引 n/2 对应 0°（正前方）
+    scan.ranges = ranges
+    return scan
+
+
+def forward(v):
+    cmd = Twist()
+    cmd.linear.x = v
+    return cmd
+
+
+class TestSafetyStopBlackBox(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        rclpy.init()
+        cls.node = rclpy.create_node('safety_probe')
+        cls.scan_pub = cls.node.create_publisher(LaserScan, 'scan', qos_profile_sensor_data)
+        cls.cmd_pub = cls.node.create_publisher(Twist, 'cmd_vel_in', 10)
+        cls.out = []
+        cls.node.create_subscription(Twist, 'cmd_vel', lambda m: cls.out.append(m.linear.x), 10)
+        cls.wait_for_graph()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.node.destroy_node()
+        rclpy.shutdown()
+
+    @classmethod
+    def wait_for_graph(cls, timeout=10.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if (cls.scan_pub.get_subscription_count() > 0
+                    and cls.cmd_pub.get_subscription_count() > 0
+                    and cls.node.count_publishers('cmd_vel') > 0):
+                return
+            rclpy.spin_once(cls.node, timeout_sec=0.1)
+        raise AssertionError('safety_stop 的话题在 10 秒内没有出现')
+
+    def drive(self, front_distance, v, seconds=1.0, send_scan=True):
+        """以 20 Hz 同时发送雷达与速度指令，返回这段时间内收到的输出。"""
+        self.out.clear()
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if send_scan:
+                self.scan_pub.publish(make_scan(front_distance))
+            self.cmd_pub.publish(forward(v))
+            rclpy.spin_once(self.node, timeout_sec=0.05)
+        self.assertGreater(len(self.out), 5, '几乎没有收到 /cmd_vel 输出')
+        return list(self.out)
+
+    def test_clear_path_passes_command(self):
+        out = self.drive(front_distance=3.0, v=0.3)
+        self.assertAlmostEqual(out[-1], 0.3, places=3)
+
+    def test_obstacle_blocks_forward(self):
+        out = self.drive(front_distance=0.3, v=0.3)
+        self.assertTrue(all(v == 0.0 for v in out[-5:]), f'最后输出 {out[-5:]}')
+
+    def test_obstacle_allows_reverse(self):
+        out = self.drive(front_distance=0.3, v=-0.2)
+        self.assertAlmostEqual(out[-1], -0.2, places=3)
+
+    def test_lidar_loss_stops_robot(self):
+        self.drive(front_distance=3.0, v=0.3)                         # 先正常行驶
+        out = self.drive(front_distance=3.0, v=0.3, seconds=1.5, send_scan=False)
+        self.assertEqual(out[-1], 0.0, '雷达中断 1.5 s 后仍在前进（DEFECT-001）')
+
+    def test_interface_contract(self):
+        topics = dict(self.node.get_topic_names_and_types())
+        self.assertIn('geometry_msgs/msg/Twist', topics.get('/cmd_vel', []))
+        self.assertIn('sensor_msgs/msg/LaserScan', topics.get('/scan', []))
+
+        subs = [i for i in self.node.get_subscriptions_info_by_topic('/scan')
+                if i.node_name == 'safety_stop']
+        self.assertEqual(len(subs), 1)
+        self.assertEqual(subs[0].qos_profile.reliability, ReliabilityPolicy.BEST_EFFORT,
+                         '雷达订阅应使用 sensor_data QoS，才能兼容 best_effort 的雷达驱动')
+
+
+@launch_testing.post_shutdown_test()
+class TestSafetyStopShutdown(unittest.TestCase):
+
+    def test_exit_code(self, proc_info, safety):
+        launch_testing.asserts.assertExitCodes(proc_info, process=safety)
+</script>
+<p>在 T2 修复 DEFECT-001 之前，<code>test_lidar_loss_stops_robot</code> 会失败；修复后通过。这正是「同一个缺陷在组件层和集成层各有一个回归用例」的例子。</p>
+<div class="callout warn">
+  <strong>集成测试要面对「最终一致」</strong>
+  <p>消息在进程间传递有延迟，前几条输出可能还是上一状态的结果。所以断言最后几条（<code>out[-5:]</code>），而不是第一条。如果业务对响应时间有要求（例如「检测到障碍后 100 ms 内停车」），就把它写成单独的延迟测试（见 T6），而不是在功能测试里隐式依赖时序。</p>
+</div>
+
+<h2>T3.5 冒烟测试：launch 文件与启动参数</h2>
+<p>launch 文件是最容易「改坏了没人发现」的部分：路径写错、参数名拼错、条件写反，都只有在启动时才暴露。为每个对外提供的 launch 文件写一个冒烟测试：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_demo_launch_smoke.py">
+import time
+import unittest
+
+import launch
+import launch_testing.actions
+import pytest
+import rclpy
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
+from rcl_interfaces.srv import GetParameters
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    demo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution(
+            [FindPackageShare('my_first_nodes'), 'launch', 'demo.launch.py'])),
+        launch_arguments={'robot_name': 'bot_test', 'start_listener': 'false'}.items())
+    return launch.LaunchDescription([demo, launch_testing.actions.ReadyToTest()])
+
+
+class TestDemoLaunch(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        rclpy.init()
+        cls.node = rclpy.create_node('smoke_probe')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.node.destroy_node()
+        rclpy.shutdown()
+
+    def wait_nodes(self, expected, timeout=10.0):
+        end = time.monotonic() + timeout
+        names = set()
+        while time.monotonic() < end:
+            names = set(self.node.get_node_names())
+            if expected <= names:
+                break
+            rclpy.spin_once(self.node, timeout_sec=0.2)
+        return names
+
+    def test_expected_nodes_running(self):
+        names = self.wait_nodes({'param_demo', 'talker'})
+        self.assertIn('param_demo', names)
+        self.assertIn('talker', names)
+        self.assertNotIn('listener', names, 'start_listener:=false 时不应启动 listener')
+
+    def test_launch_argument_reaches_parameter(self):
+        self.wait_nodes({'param_demo'})
+        client = self.node.create_client(GetParameters, '/param_demo/get_parameters')
+        self.assertTrue(client.wait_for_service(timeout_sec=10.0))
+        future = client.call_async(GetParameters.Request(names=['robot_name']))
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=5.0)
+        self.assertTrue(future.done())
+        self.assertEqual(future.result().values[0].string_value, 'bot_test')
+</script>
+
+<h2>T3.6 测试隔离与稳定性</h2>
+<table>
+  <thead><tr><th>问题</th><th>症状</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td>多个测试 / 多人共用网络</td><td>测试收到别人节点的消息，结果随机</td><td>每个 CI 任务设置不同的 <code>ROS_DOMAIN_ID</code>（0–101 安全范围）；Jazzy 设置 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>，Humble 设置 <code>ROS_LOCALHOST_ONLY=1</code></td></tr>
+    <tr><td>并行运行测试</td><td>两个测试的 <code>safety_stop</code> 互相干扰</td><td>colcon 默认按包并行测试；在 CMake 包中可用 <code>ament_cmake_ros</code> 提供的隔离版本（如 <code>ament_add_ros_isolated_gtest</code>）自动分配独立域；或 <code>colcon test --executor sequential</code></td></tr>
+    <tr><td>固定 sleep</td><td>本地通过，CI 偶发失败</td><td>循环等待条件 + 总超时（如上面的 <code>wait_for_graph</code>）</td></tr>
+    <tr><td>没有等待发现</td><td>第一条消息丢失，偶发失败</td><td>先等待订阅数 / 发布数大于 0 再开始发送</td></tr>
+    <tr><td>超时太短</td><td>CI 机器负载高时超时</td><td>超时按「本地耗时 × 3–5」设置；超时失败时打印实际收到的内容</td></tr>
+    <tr><td>残留进程</td><td>上一个测试的节点没退出，影响下一个</td><td>检查关闭后测试的退出码；CI 每个任务使用全新容器</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>统计不稳定测试</strong>
+  <p>怀疑某个测试不稳定时，在本地连续运行它几十次：<code>for i in $(seq 1 30); do launch_test test/test_safety_stop_launch.py || echo "FAIL $i"; done</code>。不稳定测试比没有测试更糟：它会让团队习惯性地忽略红色 CI。</p>
+</div>
+
+<h2>T3.7 在 ament_cmake 包中注册 launch 测试</h2>
+<script type="text/plain" class="code" data-lang="cmake" data-file="cpp_pubsub/CMakeLists.txt（if(BUILD_TESTING) 内追加）">
+  find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(test/test_cpp_talker_launch.py
+    TIMEOUT 60)
+</script>
+<script type="text/plain" class="code" data-lang="xml" data-file="cpp_pubsub/package.xml（追加）">
+<test_depend>launch_testing_ament_cmake</test_depend>
+<test_depend>launch_testing</test_depend>
+<test_depend>launch_ros</test_depend>
+</script>
+<p>测试文件写法与 Python 包完全相同，只需把 <code>package</code> 和 <code>executable</code> 改成 C++ 节点。测试代码用 Python 写，被测节点可以是任何语言。</p>
+
+<h2>T3.8 launch_pytest：另一种写法</h2>
+<p>较新的 ROS2 版本还提供 <code>launch_pytest</code>，用 pytest 的夹具风格代替 unittest 类，适合偏好 pytest 的团队。概念相同：一个夹具返回 LaunchDescription，测试函数中断言输出和行为。两者可以在同一个项目中共存，新项目任选其一并保持一致即可。具体写法见 <a href="https://github.com/ros2/launch/tree/rolling/launch_pytest" target="_blank" rel="noopener">launch_pytest 示例</a>。</p>
+
+<h2>动手练习</h2>
+<ol>
+  <li>为 <code>mode_server</code> 写 launch 测试：启动后通过服务把模式切到 1、2，再发一个非法模式，断言返回值；关闭后检查退出码。先观察退出码失败，再修复入口写法。</li>
+  <li>为第 4 章的 <code>status_publisher</code> 写话题测试：断言 <code>battery_percent</code> 始终在 0–100 之间，<code>header.stamp</code> 单调递增。</li>
+  <li>为 <code>demo.launch.py</code> 补一个用例：传入 <code>start_listener:=true</code>，断言 listener 启动且日志中出现「收到」。</li>
+  <li>把 <code>test_safety_stop_launch.py</code> 连续运行 30 次，统计是否有不稳定的用例，并分析原因。</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 活动测试和关闭后测试分别适合检查什么？</summary>
+<div>活动测试在被测进程运行时执行，适合检查输出、话题、服务等运行期行为；关闭后测试在所有进程退出后执行，适合检查退出码、退出时的日志、生成的文件（如录包是否完整）。</div></details>
+<details class="quiz"><summary>2. 为什么话题测试中不能断言「收到的第一条消息是 #0」？</summary>
+<div>探针节点完成发现需要时间，默认的 VOLATILE 持久性不会给新订阅者补发历史消息，开头几条可能丢失。测试应该断言与发现时序无关的性质，例如序号连续、频率正确。</div></details>
+<details class="quiz"><summary>3. 测试 safety_stop 时，为什么要检查 <code>/scan</code> 订阅的 QoS？</summary>
+<div>真实雷达驱动通常以 BEST_EFFORT 发布。如果订阅端误用 RELIABLE，两者不兼容，节点将收不到任何雷达数据，并且没有报错。功能测试中测试发布者用的是兼容的 QoS，测不出这个问题，必须显式检查接口契约。</div></details>
+<details class="quiz"><summary>4. CI 中的 launch 测试偶发失败，你会按什么顺序排查？</summary>
+<div>先看失败日志中实际收到了什么（是没收到还是收到了错误值）；再检查是否有固定 sleep、是否等待了发现；然后检查 ROS_DOMAIN_ID 隔离和并行测试干扰；最后检查超时设置是否适应 CI 机器负载。必要时本地循环运行复现。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>写出并运行了 talker 的输出测试和退出码测试</li>
+  <li>亲眼看到 mode_server 退出码测试失败，并修复了入口写法</li>
+  <li>完成 safety_stop 黑盒测试，包括接口契约检查</li>
+  <li>为 demo.launch.py 写了冒烟测试</li>
+  <li>能说出至少 4 种让集成测试不稳定的原因及对策</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

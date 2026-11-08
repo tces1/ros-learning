@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>第 1 章 为什么学 ROS / ROS2 · ROS2 中文教材</title>
+<title>第 1 章 为什么学 ROS / ROS2 · ROS2 机器人测试教材</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-page="ch01" data-root="../">
@@ -163,6 +163,22 @@ Vector3 angular
   <li><strong>读源码</strong>：ROS 全部开源，遇到问题直接读 GitHub 上的源码往往最快。</li>
   <li><strong>做项目</strong>：第 16 章的毕业项目是检验你是否真正学会的标准。</li>
 </ol>
+
+<h2>测试视角</h2>
+<p>对测试工程师来说，本章最重要的两件事是：<strong>版本</strong>和<strong>约定</strong>。</p>
+<table>
+  <thead><tr><th>关注点</th><th>为什么重要</th><th>测试中怎么做</th></tr></thead>
+  <tbody>
+    <tr><td>发行版与依赖版本</td><td>Humble 与 Jazzy 的默认行为不同（如 bag 默认格式、部分接口、Gazebo 版本），同一份代码在不同版本上结果可能不同</td><td>测试报告和缺陷报告必须写明发行版；用 <code>ros2 doctor --report</code> 记录环境</td></tr>
+    <tr><td>发行版生命周期</td><td>停止维护的版本不再有安全更新</td><td>把「目标发行版」写进测试计划，产品升级发行版时安排专项回归</td></tr>
+    <tr><td>单位与坐标约定（REP-103）</td><td>米、秒、弧度；x 向前、y 向左、z 向上。单位或方向搞错是机器人最常见的缺陷之一</td><td>边界用例中专门检查单位：例如角速度 1.0 是 1 rad/s（约 57°/s），不是 1°/s</td></tr>
+    <tr><td>ROS1 遗留系统</td><td>很多公司仍在维护 ROS1 产品或混合系统</td><td>了解 ros1_bridge 的存在，桥接处的类型转换和延迟是测试重点</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>延伸阅读</strong>
+  <p>机器人测试与普通软件测试的区别、测试分层全景，见 <a href="../testing/01-test-overview.html">T1 机器人测试岗位与测试体系</a>。建议与本章同周阅读。</p>
+</div>
 
 <h2>自测题</h2>
 <details class="quiz"><summary>1. ROS 是操作系统吗？它和 Ubuntu 是什么关系？</summary>
