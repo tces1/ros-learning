@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 章 安装与第一个节点 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch03" data-root="../">
+<main class="content">
+
+<h1>第 3 章　安装与第一个节点</h1>
+<p class="lead">在 Windows（WSL2）或 Ubuntu 上装好 ROS2 Jazzy，跑通海龟仿真，然后分别用 Python 和 C++ 写出你自己的发布者与订阅者。</p>
+<div class="meta-bar"><span class="tag">动手约 2–3 小时</span><span class="tag">Python + C++</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>在 WSL2 中安装 Ubuntu 24.04（Windows 用户）</li>
+  <li>通过 apt 安装 ROS2 Jazzy 与开发工具</li>
+  <li>运行 turtlesim，体验节点、话题、服务</li>
+  <li>创建工作空间，编写 Python 与 C++ 版本的 talker / listener</li>
+  <li>配置 VS Code / Cursor 的代码补全</li>
+</ul>
+
+<h2>3.1 Windows 用户：安装 WSL2</h2>
+<p>以<strong>管理员身份</strong>打开 PowerShell，执行：</p>
+<script type="text/plain" class="code" data-lang="bash">
+wsl --install -d Ubuntu-24.04
+</script>
+<p>完成后重启电脑，开始菜单中打开「Ubuntu 24.04」，按提示设置 Linux 用户名和密码。之后检查 WSL 版本：</p>
+<script type="text/plain" class="code" data-lang="bash">
+# 在 PowerShell 中执行
+wsl --update
+wsl -l -v      # VERSION 一列应为 2
+</script>
+<div class="callout tip">
+  <strong>WSL 使用建议</strong>
+  <ul>
+    <li>代码放在 Linux 文件系统（<code>~/ros2_ws</code>），不要放在 <code>/mnt/c/...</code>，否则编译慢 5–10 倍。</li>
+    <li>Windows 11 自带 WSLg，RViz、Gazebo 窗口可以直接弹出。</li>
+    <li>VS Code / Cursor 安装 WSL 扩展后，在 Ubuntu 终端里运行 <code>code ~/ros2_ws</code> 或 <code>cursor ~/ros2_ws</code> 即可远程编辑。</li>
+    <li>如果 Gazebo 窗口黑屏或崩溃，先尝试 <code>export LIBGL_ALWAYS_SOFTWARE=1</code>（软件渲染，较慢但稳定）。</li>
+  </ul>
+</div>
+
+<h2>3.2 安装 ROS2 Jazzy</h2>
+<p>以下所有命令都在 Ubuntu 24.04 终端中执行。</p>
+<h3>第 1 步：设置 UTF-8 语言环境</h3>
+<script type="text/plain" class="code" data-lang="bash">
+locale   # 检查，若已有 UTF-8 可跳过本步
+sudo apt update && sudo apt install -y locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+</script>
+<h3>第 2 步：启用 universe 仓库</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y software-properties-common
+sudo add-apt-repository universe
+</script>
+<h3>第 3 步：添加 ROS2 软件源（官方推荐方式）</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt update && sudo apt install -y curl
+export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F\" '{print $4}')
+curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo $VERSION_CODENAME)_all.deb"
+sudo dpkg -i /tmp/ros2-apt-source.deb
+</script>
+<div class="callout note">
+  <strong>国内网络访问 GitHub 失败时</strong>
+  <p>可改用清华镜像源（仍需要能下载 ros.key，可从镜像站或他人处获取该文件）：</p>
+</div>
+<script type="text/plain" class="code" data-lang="bash">
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+</script>
+<h3>第 4 步：安装</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt update
+sudo apt upgrade -y          # 重要：先升级系统包，避免依赖冲突
+sudo apt install -y ros-jazzy-desktop ros-dev-tools
+</script>
+<table>
+  <thead><tr><th>安装包</th><th>包含内容</th><th>大小</th></tr></thead>
+  <tbody>
+    <tr><td><code>ros-jazzy-ros-base</code></td><td>核心通信库与命令行，无 GUI（适合机器人本体）</td><td>约 300 MB</td></tr>
+    <tr><td><code>ros-jazzy-desktop</code></td><td>ros-base + RViz2 + rqt + demo（学习推荐）</td><td>约 1.5 GB</td></tr>
+    <tr><td><code>ros-dev-tools</code></td><td>colcon、rosdep、vcstool 等开发工具</td><td>—</td></tr>
+  </tbody>
+</table>
+<h3>第 5 步：配置环境</h3>
+<script type="text/plain" class="code" data-lang="bash">
+echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
+echo "export ROS_DOMAIN_ID=7" >> ~/.bashrc                         # 选一个自己的数字
+echo "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST" >> ~/.bashrc  # 单机学习推荐
+source ~/.bashrc
+
+printenv | grep ROS   # 应能看到 ROS_DISTRO=jazzy 等变量
+</script>
+<h3>第 6 步：初始化 rosdep</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo rosdep init
+rosdep update
+</script>
+<div class="callout note">
+  <strong>rosdep update 超时</strong>
+  <p>国内可使用社区工具 <code>rosdepc</code>（<code>pip install rosdepc</code>，然后 <code>sudo rosdepc init &amp;&amp; rosdepc update</code>），它使用国内镜像。</p>
+</div>
+
+<h2>3.3 验证：小海龟仿真</h2>
+<p>打开<strong>终端 1</strong>：</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run turtlesim turtlesim_node
+</script>
+<p>打开<strong>终端 2</strong>，用方向键控制海龟（焦点要在这个终端上）：</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run turtlesim turtle_teleop_key
+</script>
+<p>打开<strong>终端 3</strong>，开始用命令行观察系统：</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 node list                         # /turtlesim  /teleop_turtle
+ros2 topic list -t                     # 话题及其类型
+ros2 topic echo /turtle1/pose          # 实时查看海龟位姿，Ctrl+C 退出
+ros2 topic hz /turtle1/pose            # 发布频率
+
+# 自己发布速度指令，让海龟画圆（--rate 1 表示每秒发一次）
+ros2 topic pub --rate 1 /turtle1/cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 2.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 1.8}}"
+
+# 调用服务：在 (2, 2) 处生成第二只海龟
+ros2 service call /spawn turtlesim/srv/Spawn "{x: 2.0, y: 2.0, theta: 0.0, name: 'turtle2'}"
+
+# 修改参数：背景色
+ros2 param set /turtlesim background_r 150
+
+# 动作：让海龟旋转到指定角度
+ros2 action send_goal /turtle1/rotate_absolute turtlesim/action/RotateAbsolute "{theta: 1.57}" --feedback
+</script>
+<p>此时运行 <code>rqt_graph</code> 可以看到节点与话题的连接图。<strong>恭喜，Topic / Service / Parameter / Action 四种通信方式你都已经用过了。</strong></p>
+
+<h2>3.4 创建工作空间</h2>
+<script type="text/plain" class="code" data-lang="bash">
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws
+colcon build          # 空工作空间也可以构建，会生成 build/ install/ log/
+</script>
+
+<h2>3.5 Python 节点：发布者与订阅者</h2>
+<h3>创建包</h3>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src
+ros2 pkg create my_first_nodes --build-type ament_python --license Apache-2.0 \
+  --dependencies rclpy std_msgs
+</script>
+<h3>发布者</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="~/ros2_ws/src/my_first_nodes/my_first_nodes/talker.py">
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class Talker(Node):
+    def __init__(self):
+        super().__init__('talker')                      # 节点名
+        self.publisher = self.create_publisher(String, 'chatter', 10)  # 话题名、队列深度
+        self.count = 0
+        self.timer = self.create_timer(0.5, self.on_timer)              # 每 0.5 秒回调一次
+
+    def on_timer(self):
+        msg = String()
+        msg.data = f'Hello ROS2 #{self.count}'
+        self.publisher.publish(msg)
+        self.get_logger().info(f'发布: {msg.data}')
+        self.count += 1
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = Talker()
+    try:
+        rclpy.spin(node)          # 进入事件循环，处理定时器和回调
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<h3>订阅者</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="~/ros2_ws/src/my_first_nodes/my_first_nodes/listener.py">
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class Listener(Node):
+    def __init__(self):
+        super().__init__('listener')
+        self.subscription = self.create_subscription(String, 'chatter', self.on_message, 10)
+
+    def on_message(self, msg: String):
+        self.get_logger().info(f'收到: {msg.data}')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = Listener()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<h3>注册可执行入口</h3>
+<p>编辑 <code>setup.py</code>，在 <code>entry_points</code> 中加入两行：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="~/ros2_ws/src/my_first_nodes/setup.py">
+from setuptools import find_packages, setup
+
+package_name = 'my_first_nodes'
+
+setup(
+    name=package_name,
+    version='0.0.1',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='you',
+    maintainer_email='you@example.com',
+    description='My first ROS2 nodes',
+    license='Apache-2.0',
+    entry_points={
+        'console_scripts': [
+            'talker = my_first_nodes.talker:main',
+            'listener = my_first_nodes.listener:main',
+        ],
+    },
+)
+</script>
+<h3>构建与运行</h3>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws
+colcon build --packages-select my_first_nodes --symlink-install
+source install/setup.bash
+
+ros2 run my_first_nodes talker      # 终端 1
+ros2 run my_first_nodes listener    # 终端 2（新终端需要先 source install/setup.bash）
+</script>
+<div class="callout tip">
+  <strong>--symlink-install 的好处</strong>
+  <p>Python 文件以符号链接方式安装，修改代码后无需重新 <code>colcon build</code> 即可生效（但新增文件或修改 <code>setup.py</code> 后仍需重新构建）。</p>
+</div>
+<div class="callout warn">
+  <strong>每个新终端都要 source</strong>
+  <p>新开的终端只自动加载了 <code>/opt/ros/jazzy</code>，还不认识你的包。可以把 <code>source ~/ros2_ws/install/setup.bash</code> 也加入 <code>~/.bashrc</code>，但要注意：若工作空间构建失败，每次开终端都会报错。</p>
+</div>
+
+<h2>3.6 C++ 节点：同样的功能</h2>
+<h3>创建包</h3>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src
+ros2 pkg create cpp_pubsub --build-type ament_cmake --license Apache-2.0 \
+  --dependencies rclcpp std_msgs
+</script>
+<h3>发布者</h3>
+<script type="text/plain" class="code" data-lang="cpp" data-file="~/ros2_ws/src/cpp_pubsub/src/talker.cpp">
+#include <chrono>
+#include <memory>
+#include <string>
+
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
+
+using namespace std::chrono_literals;
+
+class Talker : public rclcpp::Node
+{
+public:
+  Talker() : Node("cpp_talker")
+  {
+    publisher_ = create_publisher<std_msgs::msg::String>("chatter", 10);
+    timer_ = create_wall_timer(500ms, [this]() {
+      std_msgs::msg::String msg;
+      msg.data = "Hello from C++ #" + std::to_string(count_++);
+      RCLCPP_INFO(get_logger(), "发布: '%s'", msg.data.c_str());
+      publisher_->publish(msg);
+    });
+  }
+
+private:
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  size_t count_ = 0;
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<Talker>());
+  rclcpp::shutdown();
+  return 0;
+}
+</script>
+<h3>订阅者</h3>
+<script type="text/plain" class="code" data-lang="cpp" data-file="~/ros2_ws/src/cpp_pubsub/src/listener.cpp">
+#include <memory>
+
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
+
+class Listener : public rclcpp::Node
+{
+public:
+  Listener() : Node("cpp_listener")
+  {
+    subscription_ = create_subscription<std_msgs::msg::String>(
+      "chatter", 10,
+      [this](const std_msgs::msg::String & msg) {
+        RCLCPP_INFO(get_logger(), "收到: '%s'", msg.data.c_str());
+      });
+  }
+
+private:
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr subscription_;
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<Listener>());
+  rclcpp::shutdown();
+  return 0;
+}
+</script>
+<h3>CMakeLists.txt</h3>
+<script type="text/plain" class="code" data-lang="cmake" data-file="~/ros2_ws/src/cpp_pubsub/CMakeLists.txt">
+cmake_minimum_required(VERSION 3.8)
+project(cpp_pubsub)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+
+add_executable(talker src/talker.cpp)
+ament_target_dependencies(talker rclcpp std_msgs)
+
+add_executable(listener src/listener.cpp)
+ament_target_dependencies(listener rclcpp std_msgs)
+
+# 可执行文件必须安装到 lib/<包名>，ros2 run 才能找到
+install(TARGETS talker listener
+  DESTINATION lib/${PROJECT_NAME})
+
+ament_package()
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws
+colcon build --packages-select cpp_pubsub
+source install/setup.bash
+ros2 run cpp_pubsub talker
+# 另一终端：Python 的 listener 也能收到 C++ talker 的消息
+ros2 run my_first_nodes listener
+</script>
+<div class="callout note">
+  <strong>跨语言互通</strong>
+  <p>C++ 发布、Python 订阅完全没问题——它们之间只约定话题名和消息类型，这就是 ROS 解耦的威力。</p>
+</div>
+
+<h2>3.7 理解 spin 与回调</h2>
+<p>ROS2 程序是事件驱动的。<code>spin()</code> 是一个循环，不断检查「有没有到期的定时器、有没有新消息、有没有服务请求」，有就调用对应的回调函数。</p>
+<pre class="diagram">
+rclpy.spin(node)
+   │
+   ├─► 等待事件（定时器到期 / 消息到达 / 服务请求 …）
+   ├─► 取出事件，调用对应回调 on_timer() / on_message()
+   └─► 回到等待
+</pre>
+<div class="callout danger">
+  <strong>不要在回调里写死循环或 time.sleep()</strong>
+  <p>默认是单线程执行器：一个回调阻塞，所有其他回调（包括订阅）都会停止。周期性任务用定时器，耗时任务放到独立线程或使用多线程执行器（第 4 章）。</p>
+</div>
+
+<h2>3.8 配置编辑器代码补全</h2>
+<p>C++ 补全需要编译数据库。构建时导出它：</p>
+<script type="text/plain" class="code" data-lang="bash">
+colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+</script>
+<p>安装 clangd 扩展后，在工作空间根目录建立 <code>.clangd</code> 或让它读取 <code>build/compile_commands.json</code>。若使用微软 C/C++ 扩展，可在 <code>.vscode/c_cpp_properties.json</code> 中设置：</p>
+<script type="text/plain" class="code" data-lang="text" data-file=".vscode/c_cpp_properties.json">
+{
+  "configurations": [{
+    "name": "ROS2",
+    "includePath": ["${workspaceFolder}/**", "/opt/ros/jazzy/include/**"],
+    "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "cppStandard": "c++17"
+  }],
+  "version": 4
+}
+</script>
+<p>Python 补全：确保在已 source 环境的终端中启动编辑器（<code>code .</code>），或在设置中添加 <code>python.analysis.extraPaths</code>: <code>["/opt/ros/jazzy/lib/python3.12/site-packages"]</code>。</p>
+
+<h2>3.9 常用命令速查</h2>
+<table>
+  <thead><tr><th>命令</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>ros2 pkg create</code></td><td>创建包</td></tr>
+    <tr><td><code>ros2 pkg list</code> / <code>ros2 pkg executables 包名</code></td><td>列出包 / 包内可执行程序</td></tr>
+    <tr><td><code>ros2 run 包 程序</code></td><td>运行节点</td></tr>
+    <tr><td><code>ros2 node list</code> / <code>info</code></td><td>查看节点</td></tr>
+    <tr><td><code>ros2 topic list/echo/hz/info/pub</code></td><td>话题操作</td></tr>
+    <tr><td><code>ros2 interface show std_msgs/msg/String</code></td><td>查看消息定义</td></tr>
+    <tr><td><code>ros2 doctor</code></td><td>环境体检</td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 运行 <code>ros2 run my_first_nodes talker</code> 报 “Package 'my_first_nodes' not found”，可能原因？</summary>
+<div>（1）当前终端没有 <code>source ~/ros2_ws/install/setup.bash</code>；（2）包没有构建成功；（3）在错误的目录执行了 <code>colcon build</code>（必须在工作空间根目录 <code>~/ros2_ws</code>，而不是 <code>src</code> 里）。</div></details>
+<details class="quiz"><summary>2. 报 “No executable found”，又是什么原因？</summary>
+<div>包找到了但可执行程序没有。Python 包检查 <code>setup.py</code> 中 <code>console_scripts</code> 是否正确注册并重新构建；C++ 包检查 <code>install(TARGETS ... DESTINATION lib/${PROJECT_NAME})</code> 是否写了。</div></details>
+<details class="quiz"><summary>3. 为什么 talker 和 listener 不需要知道对方的 IP 或进程号？</summary>
+<div>它们只约定话题名 <code>chatter</code> 和类型 <code>std_msgs/msg/String</code>，DDS 的发现机制会自动找到匹配的发布者与订阅者并建立连接。</div></details>
+<details class="quiz"><summary>4. 把 talker 的定时器回调改成 <code>while True: publish(); time.sleep(1)</code> 会怎样？</summary>
+<div>第一次进入回调后就永远不返回，<code>spin</code> 被卡死。看似能发布，但同一节点的其他回调（订阅、服务、参数服务）全部无法执行，Ctrl+C 也可能无法优雅退出。应使用定时器。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li><code>printenv ROS_DISTRO</code> 输出 jazzy（或 humble）</li>
+  <li>turtlesim 能用键盘控制，并能用 <code>ros2 topic pub</code> 让它画圆</li>
+  <li>Python talker / listener 能正常通信</li>
+  <li>C++ talker 与 Python listener 能互通</li>
+  <li>理解 <code>spin</code> 与回调的关系</li>
+  <li>编辑器中 <code>rclcpp</code> / <code>rclpy</code> 有代码补全</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

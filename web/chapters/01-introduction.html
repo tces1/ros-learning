@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 为什么学 ROS / ROS2 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch01" data-root="../">
+<main class="content">
+
+<h1>第 1 章　为什么学 ROS / ROS2</h1>
+<p class="lead">搞清楚 ROS 解决什么问题、它由哪些部分组成、该选哪个发行版，以及 ROS1 与 ROS2 到底差在哪里。</p>
+<div class="meta-bar"><span class="tag">阅读约 25 分钟</span><span class="tag">无需编程</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>说清楚「机器人软件为什么需要一套中间件」</li>
+  <li>理解 ROS 的四大组成：通信框架、工具、功能库、社区生态</li>
+  <li>知道 Humble、Jazzy、Kilted、Rolling 等发行版的区别并做出选择</li>
+  <li>能列举 ROS1 与 ROS2 在架构上的 5 个主要差异</li>
+</ul>
+
+<h2>1.1 机器人软件的难题</h2>
+<p>假设你要做一台室内送餐机器人，它至少需要这些软件模块：</p>
+<pre class="diagram">
+ ┌──────────┐   ┌──────────┐   ┌──────────┐
+ │ 激光雷达 │   │  深度相机 │   │ 轮式编码器│      传感器驱动
+ └────┬─────┘   └────┬─────┘   └────┬─────┘
+      │ 点/扫描        │ 图像/点云     │ 轮速
+      ▼               ▼              ▼
+ ┌──────────────────────────────────────────┐
+ │   定位（我在哪）  建图（环境长什么样）      │   感知与状态估计
+ └───────────────────┬──────────────────────┘
+                     ▼
+ ┌──────────────────────────────────────────┐
+ │   全局路径规划  →  局部避障控制             │   决策与规划
+ └───────────────────┬──────────────────────┘
+                     ▼  速度指令
+ ┌──────────────────────────────────────────┐
+ │        电机驱动 / 底盘控制器               │   执行
+ └──────────────────────────────────────────┘
+</pre>
+<p>如果从零开发，你会遇到一连串工程问题：</p>
+<ol>
+  <li><strong>进程间通信</strong>：模块之间怎么传数据？自己写 Socket 协议？数据格式怎么定义？</li>
+  <li><strong>模块复用</strong>：别人写好的 SLAM 算法，接口和你的不一样，怎么接入？</li>
+  <li><strong>时间与坐标</strong>：激光装在车头 20 cm 处，相机装在车顶，它们的数据怎么统一到同一个坐标系？时间戳怎么对齐？</li>
+  <li><strong>调试</strong>：机器人跑一圈出了问题，怎么把当时的传感器数据录下来反复回放分析？</li>
+  <li><strong>可视化</strong>：怎么把点云、路径、地图实时画出来？</li>
+  <li><strong>多语言</strong>：算法同学用 Python，驱动同学用 C++，怎么协作？</li>
+</ol>
+<p>ROS 的价值就是把这些「每个机器人项目都要重复解决的问题」统一解决掉，让你专注于算法和业务本身。</p>
+
+<h2>1.2 ROS 到底是什么</h2>
+<p>ROS 全称 Robot Operating System，但它<strong>不是</strong> Windows、Linux 那种操作系统，它运行在 Linux（以及 Windows、macOS）之上。更准确的定义是：</p>
+<div class="callout note">
+  <strong>定义</strong>
+  <p>ROS 是一套面向机器人的<strong>开源软件开发框架</strong>，由「通信中间件 + 开发工具 + 功能库 + 社区生态」四部分组成。</p>
+</div>
+<table>
+  <thead><tr><th>组成部分</th><th>内容</th><th>举例</th></tr></thead>
+  <tbody>
+    <tr><td>通信框架（Plumbing）</td><td>节点之间的发布/订阅、请求/响应、长任务通信</td><td>Topic、Service、Action、Parameter</td></tr>
+    <tr><td>工具（Tools）</td><td>命令行、可视化、录包、构建系统</td><td><code>ros2</code> CLI、RViz2、rqt、rosbag2、colcon</td></tr>
+    <tr><td>功能库（Capabilities）</td><td>成熟的机器人算法包</td><td>Nav2 导航、MoveIt 机械臂、slam_toolbox、ros2_control</td></tr>
+    <tr><td>生态（Ecosystem）</td><td>数千个开源包、硬件厂商驱动、文档、社区</td><td>激光雷达/相机厂商官方 ROS 驱动、ROS Discourse 论坛</td></tr>
+  </tbody>
+</table>
+<p>一句话理解：<strong>ROS 之于机器人，类似 Spring 之于 Java 后端、React 之于前端</strong>——它规定了模块之间如何协作，并提供大量现成轮子。</p>
+
+<h2>1.3 发展历史</h2>
+<table>
+  <thead><tr><th>年份</th><th>事件</th></tr></thead>
+  <tbody>
+    <tr><td>2007</td><td>斯坦福人工智能实验室 STAIR 项目中诞生雏形</td></tr>
+    <tr><td>2010</td><td>Willow Garage 发布 ROS 1.0（Box Turtle），配套 PR2 机器人</td></tr>
+    <tr><td>2013</td><td>开源机器人基金会（OSRF，现 Open Robotics）接手维护</td></tr>
+    <tr><td>2017</td><td>ROS2 第一个正式版 Ardent 发布，底层改用 DDS</td></tr>
+    <tr><td>2020</td><td>ROS1 最后一个发行版 Noetic 发布</td></tr>
+    <tr><td>2022</td><td>ROS2 Humble（LTS）发布，成为工业界主流</td></tr>
+    <tr><td>2024</td><td>ROS2 Jazzy（LTS）发布；Gazebo Harmonic 成为配套仿真器</td></tr>
+    <tr><td>2025-05</td><td>ROS1 Noetic 停止维护（EOL）；ROS2 Kilted 发布，Zenoh 成为官方支持的中间件</td></tr>
+  </tbody>
+</table>
+
+<h2>1.4 发行版怎么选</h2>
+<p>ROS2 每年 5 月 23 日（世界海龟日）发布一个新版本，名字按字母顺序，以海龟品种命名。偶数年发布的是<strong>长期支持版（LTS）</strong>，维护 5 年；奇数年是普通版，维护约 1.5 年。</p>
+<table>
+  <thead><tr><th>发行版</th><th>发布</th><th>停止维护</th><th>对应 Ubuntu</th><th>配套 Gazebo</th><th>建议</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Jazzy Jalisco</strong>（LTS）</td><td>2024-05</td><td>2029-05</td><td>24.04</td><td>Harmonic</td><td><strong>新手首选，本教材主线</strong></td></tr>
+    <tr><td>Humble Hawksbill（LTS）</td><td>2022-05</td><td>2027-05</td><td>22.04</td><td>Fortress（Classic 11 已 EOL）</td><td>大量公司项目在用，资料最多</td></tr>
+    <tr><td>Kilted Kaiju</td><td>2025-05</td><td>约 2026 年底</td><td>24.04</td><td>Ionic</td><td>短期版，不建议学习用</td></tr>
+    <tr><td>Rolling Ridley</td><td>持续更新</td><td>—</td><td>最新</td><td>最新</td><td>给 ROS 本身的开发者用，API 会变</td></tr>
+    <tr><td>Noetic（ROS1）</td><td>2020-05</td><td>2025-05（已停止）</td><td>20.04</td><td>Classic 11</td><td>只用于维护老项目</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>选择建议</strong>
+  <p>没有历史包袱就选 <strong>Jazzy + Ubuntu 24.04</strong>。公司项目还在 Humble 上也没关系：两者 API 差异很小，本教材的代码在 Humble 上基本都能直接运行，差异处会单独标注。</p>
+</div>
+
+<h2>1.5 ROS1 与 ROS2 的核心差异</h2>
+<p>ROS1 诞生于学术研究，设计时假设「一台机器人、一台电脑、网络可靠」。当 ROS 被用到工业产品、无人车、多机器人系统时，这些假设不再成立，于是有了彻底重写的 ROS2。</p>
+<table>
+  <thead><tr><th>维度</th><th>ROS1</th><th>ROS2</th><th>带来的影响</th></tr></thead>
+  <tbody>
+    <tr><td>节点发现</td><td>依赖中心节点 <code>roscore</code>（Master）</td><td>DDS 去中心化自动发现</td><td>没有单点故障；不用先启动 roscore</td></tr>
+    <tr><td>通信协议</td><td>自研 TCPROS / UDPROS</td><td>工业标准 DDS（也支持 Zenoh）</td><td>可调 QoS，可跨厂商互通</td></tr>
+    <tr><td>服务质量</td><td>只有队列长度</td><td>完整 QoS：可靠性、持久性、截止期等</td><td>可适应无线等不可靠网络</td></tr>
+    <tr><td>实时性</td><td>基本不支持</td><td>设计上支持实时（需配合实时内核）</td><td>可用于控制回路</td></tr>
+    <tr><td>节点生命周期</td><td>无</td><td>Lifecycle Node 状态机</td><td>系统启动顺序可控</td></tr>
+    <tr><td>进程内通信</td><td>Nodelet（较复杂）</td><td>组件（Component）+ 零拷贝</td><td>大数据（图像、点云）传输更高效</td></tr>
+    <tr><td>平台</td><td>主要 Linux</td><td>Linux / Windows / macOS / 嵌入式（micro-ROS）</td><td>可以跑在单片机上</td></tr>
+    <tr><td>安全</td><td>无</td><td>SROS2：加密、认证、访问控制</td><td>可满足产品级安全需求</td></tr>
+    <tr><td>Python</td><td>Python 2/3（Noetic 才全面 3）</td><td>Python 3</td><td>—</td></tr>
+    <tr><td>构建工具</td><td>catkin</td><td>ament + colcon</td><td>命令完全不同</td></tr>
+    <tr><td>Launch</td><td>XML</td><td>Python / XML / YAML</td><td>可在 launch 中写逻辑</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>ROS1 与 ROS2 不能直接互通</strong>
+  <p>两者的消息无法直接互发。混合系统需要 <code>ros1_bridge</code>，而且 Noetic 已停止维护，新项目没有理由再选 ROS1。</p>
+</div>
+
+<h2>1.6 三个核心概念（先有个印象）</h2>
+<p>后面所有章节都建立在下面三个概念上，现在不必完全理解：</p>
+<h3>节点（Node）</h3>
+<p>完成单一职责的程序单元，例如「激光雷达驱动节点」「路径规划节点」。一个可执行程序里可以有一个或多个节点。</p>
+<h3>通信接口</h3>
+<table>
+  <thead><tr><th>接口</th><th>模式</th><th>类比</th><th>典型用途</th></tr></thead>
+  <tbody>
+    <tr><td>Topic 话题</td><td>发布 / 订阅，多对多，单向</td><td>广播电台</td><td>传感器数据流、速度指令</td></tr>
+    <tr><td>Service 服务</td><td>请求 / 响应，一对一</td><td>打电话问问题</td><td>查询状态、触发一次性操作</td></tr>
+    <tr><td>Action 动作</td><td>目标 + 持续反馈 + 结果，可取消</td><td>点外卖并实时看配送进度</td><td>导航到某点、机械臂抓取</td></tr>
+    <tr><td>Parameter 参数</td><td>节点的可配置项</td><td>软件的设置页</td><td>最大速度、传感器频率</td></tr>
+  </tbody>
+</table>
+<h3>接口类型（Interface）</h3>
+<p>所有数据都有强类型定义，写在 <code>.msg</code>、<code>.srv</code>、<code>.action</code> 文件里。比如速度指令 <code>geometry_msgs/msg/Twist</code>：</p>
+<script type="text/plain" class="code" data-lang="ros" data-file="geometry_msgs/msg/Twist.msg">
+# 线速度（m/s）与角速度（rad/s）
+Vector3 linear
+Vector3 angular
+</script>
+
+<h2>1.7 谁在用 ROS</h2>
+<ul>
+  <li><strong>服务与物流机器人</strong>：仓储 AMR、送餐机器人、清洁机器人大量基于 Nav2</li>
+  <li><strong>工业机械臂</strong>：ABB、UR、FANUC、KUKA 都有官方或社区 ROS2 驱动，MoveIt 用于规划</li>
+  <li><strong>自动驾驶</strong>：Autoware 是基于 ROS2 的开源自动驾驶软件栈</li>
+  <li><strong>航天</strong>：NASA 的 VIPER 月球车、Astrobee 空间站机器人使用 ROS</li>
+  <li><strong>教育与科研</strong>：TurtleBot、各类机器人竞赛几乎都以 ROS 作为默认平台</li>
+</ul>
+
+<h2>1.8 学习 ROS 的正确姿势</h2>
+<ol>
+  <li><strong>先跑通，再理解</strong>：官方 demo 先跑起来，看到现象再去读原理。</li>
+  <li><strong>善用命令行自省</strong>：<code>ros2 node list</code>、<code>ros2 topic echo</code> 是你观察系统的眼睛。</li>
+  <li><strong>读官方文档而非过时博客</strong>：网上大量教程是 ROS1 或旧版 ROS2，命令和 API 已变化。注意看文章使用的发行版。</li>
+  <li><strong>读源码</strong>：ROS 全部开源，遇到问题直接读 GitHub 上的源码往往最快。</li>
+  <li><strong>做项目</strong>：第 16 章的毕业项目是检验你是否真正学会的标准。</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. ROS 是操作系统吗？它和 Ubuntu 是什么关系？</summary>
+<div>不是。ROS 是运行在操作系统之上的机器人软件框架（中间件 + 工具 + 功能库）。Ubuntu 是它最主要的宿主操作系统，ROS 通过 apt 软件源安装到 Ubuntu 中。</div></details>
+<details class="quiz"><summary>2. ROS1 的 roscore 挂掉会发生什么？ROS2 为什么没有这个问题？</summary>
+<div>ROS1 中所有节点通过 Master 互相发现。Master 挂掉后已建立的连接通常还能维持，但新节点无法加入、参数服务器不可用，系统无法恢复。ROS2 使用 DDS 的分布式发现协议，每个节点通过组播自动发现彼此，没有中心节点，因此不存在单点故障。</div></details>
+<details class="quiz"><summary>3. 让机器人「导航到厨房」应该用 Topic、Service 还是 Action？为什么？</summary>
+<div>用 Action。导航是耗时任务，需要持续反馈（剩余距离、当前位置），并且可能被中途取消。Service 会一直阻塞到完成，无法给出进度，也不能取消；Topic 没有「完成 / 失败」的结果语义。</div></details>
+<details class="quiz"><summary>4. 2026 年开始一个新项目，应选哪个发行版？</summary>
+<div>Jazzy（LTS，维护到 2029 年 5 月），配合 Ubuntu 24.04 和 Gazebo Harmonic。若必须与现有 Humble 系统集成，可以选 Humble，但要注意它在 2027 年 5 月停止维护。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能用自己的话解释 ROS 解决了哪些工程问题</li>
+  <li>能说出 ROS 的四大组成部分</li>
+  <li>知道自己将要使用的发行版及其对应的 Ubuntu 版本</li>
+  <li>能列出 ROS1 与 ROS2 至少 5 点差异</li>
+  <li>能说出 Topic / Service / Action 各自适合的场景</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

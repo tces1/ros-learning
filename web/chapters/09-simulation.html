@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章 Gazebo 仿真入门 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch09" data-root="../">
+<main class="content">
+
+<h1>第 9 章　Gazebo 仿真入门</h1>
+<p class="lead">把第 8 章的小车放进 Gazebo Harmonic 物理仿真：加上差速驱动插件和激光雷达，用 ros_gz_bridge 打通 ROS2，最后用键盘开着它在房间里跑，并在 RViz 中看到激光数据。</p>
+<div class="meta-bar"><span class="tag">动手约 3–4 小时</span><span class="tag">产出：my_bot_gazebo 包</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解 Gazebo 与 ROS2 的关系及版本对应</li>
+  <li>编写包含物理、传感器系统的 SDF 世界</li>
+  <li>在 URDF 中添加 Gazebo 插件：差速驱动、关节状态、激光雷达</li>
+  <li>配置 ros_gz_bridge 进行话题桥接</li>
+  <li>完成「仿真 + 键盘遥控 + RViz 显示」闭环</li>
+</ul>
+
+<h2>9.1 Gazebo 与 ROS2</h2>
+<p>Gazebo 是独立的仿真器，有自己的通信系统（gz-transport）和消息格式（gz.msgs）。它和 ROS2 之间通过 <strong>ros_gz_bridge</strong> 转换消息。</p>
+<pre class="diagram">
+ ┌────────────── Gazebo Harmonic ───────────────┐          ┌──────────── ROS2 ────────────┐
+ │  DiffDrive 插件 ◄── gz /cmd_vel ─────────────┼─ bridge ─┼── /cmd_vel ◄── teleop / Nav2 │
+ │  DiffDrive 插件 ──► gz /odom, /tf ───────────┼─ bridge ─┼──► /odom, /tf                │
+ │  JointStatePub  ──► gz /joint_states ────────┼─ bridge ─┼──► /joint_states ──► RSP     │
+ │  gpu_lidar 传感器 ──► gz /scan ──────────────┼─ bridge ─┼──► /scan ──► RViz / SLAM    │
+ │  仿真时钟        ──► gz /clock ──────────────┼─ bridge ─┼──► /clock                    │
+ └──────────────────────────────────────────────┘          └──────────────────────────────┘
+</pre>
+<table>
+  <thead><tr><th>ROS2</th><th>推荐 Gazebo</th><th>安装</th><th>命名前缀</th></tr></thead>
+  <tbody>
+    <tr><td>Jazzy</td><td>Harmonic</td><td><code>ros-jazzy-ros-gz</code></td><td><code>gz-sim-...</code>、<code>gz::sim::</code>、<code>gz.msgs</code></td></tr>
+    <tr><td>Humble</td><td>Fortress</td><td><code>ros-humble-ros-gz</code></td><td><code>ignition-gazebo-...</code>、<code>ignition::gazebo::</code>、<code>ignition.msgs</code></td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>Gazebo Classic（gazebo11）已于 2025 年 1 月停止维护</strong>
+  <p>网上大量教程使用 <code>gazebo_ros</code>、<code>libgazebo_ros_diff_drive.so</code>，那是旧版 Gazebo Classic 的写法，在 Jazzy 上不可用。本章全部使用新版 Gazebo。</p>
+</div>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-ros-gz ros-jazzy-teleop-twist-keyboard
+gz sim shapes.sdf          # 测试 Gazebo 能否打开
+</script>
+<div class="callout tip">
+  <strong>WSL2 或虚拟机中 Gazebo 打不开 / 黑屏</strong>
+  <p>先尝试 <code>export LIBGL_ALWAYS_SOFTWARE=1</code> 使用软件渲染；若仍崩溃，可尝试 <code>gz sim -s</code>（只运行服务端、无界面），用 RViz 观察结果。</p>
+</div>
+
+<h2>9.2 创建仿真包</h2>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src
+ros2 pkg create my_bot_gazebo --build-type ament_cmake --license Apache-2.0
+cd my_bot_gazebo && mkdir -p launch worlds config
+</script>
+
+<h2>9.3 编写世界文件</h2>
+<p>世界用 SDF 格式描述。注意：<strong>必须加载 Sensors 系统插件</strong>，否则激光雷达不会输出数据。</p>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_gazebo/worlds/room.sdf">
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <world name="room">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.8 0.8 0.8 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 8m x 8m 的房间：四面墙 -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 4 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>8 0.1 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.1 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -4 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>8 0.1 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.1 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>4 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.1 8 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.1 8 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-4 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.1 8 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.1 8 1</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- 障碍物 -->
+    <model name="box1">
+      <static>true</static>
+      <pose>1.5 1.5 0.25 0 0 0.4</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.5 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.8 0.5 0.5</size></box></geometry>
+          <material><diffuse>0.9 0.4 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="pillar">
+      <static>true</static>
+      <pose>-1.5 -1.0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.3</radius><length>1</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.3</radius><length>1</length></cylinder></geometry>
+          <material><diffuse>0.3 0.7 0.3 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="partition">
+      <static>true</static>
+      <pose>-1.0 2.0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.5 0.1 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.5 0.1 1</size></box></geometry></visual>
+      </link>
+    </model>
+  </world>
+</sdf>
+</script>
+
+<h2>9.4 给 URDF 添加 Gazebo 插件</h2>
+<p>在 <code>my_bot_description/urdf/</code> 中新建 <code>gazebo.xacro</code>：</p>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_description/urdf/gazebo.xacro">
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 万向轮无摩擦，避免拖拽 -->
+  <gazebo reference="caster_link">
+    <mu1>0.0</mu1>
+    <mu2>0.0</mu2>
+  </gazebo>
+
+  <gazebo>
+    <!-- 差速驱动：订阅 cmd_vel，发布 odom 和 odom->base_footprint 的 TF -->
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${wheel_separation}</wheel_separation>
+      <wheel_radius>${wheel_radius}</wheel_radius>
+      <max_linear_acceleration>1.0</max_linear_acceleration>
+      <max_angular_acceleration>2.0</max_angular_acceleration>
+      <topic>cmd_vel</topic>
+      <odom_topic>odom</odom_topic>
+      <tf_topic>tf</tf_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+      <odom_publish_frequency>30</odom_publish_frequency>
+    </plugin>
+
+    <!-- 发布车轮关节角，供 robot_state_publisher 计算车轮 TF -->
+    <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
+      <topic>joint_states</topic>
+    </plugin>
+  </gazebo>
+
+  <!-- 2D 激光雷达 -->
+  <gazebo reference="laser_link">
+    <sensor name="lidar" type="gpu_lidar">
+      <gz_frame_id>laser_link</gz_frame_id>
+      <topic>scan</topic>
+      <update_rate>10</update_rate>
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </lidar>
+    </sensor>
+  </gazebo>
+
+</robot>
+</script>
+<p>在 <code>my_bot.urdf.xacro</code> 的 <code>&lt;/robot&gt;</code> 之前引入它（必须放在属性定义之后，才能使用 <code>${wheel_radius}</code> 等）：</p>
+<script type="text/plain" class="code" data-lang="xml">
+  <xacro:include filename="gazebo.xacro"/>
+</robot>
+</script>
+<div class="callout note">
+  <strong>为什么需要 gz_frame_id</strong>
+  <p>Gazebo 加载 URDF 时会把固定关节连接的 link 合并（laser_link 被并入 base_link），所以默认发出的 scan 消息 frame_id 不是 <code>laser_link</code>。<code>gz_frame_id</code> 强制指定 frame_id，保证与 TF 树一致。</p>
+</div>
+
+<h2>9.5 桥接配置</h2>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_gazebo/config/bridge.yaml">
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/cmd_vel"
+  gz_topic_name: "/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/odom"
+  gz_topic_name: "/odom"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/tf"
+  gz_topic_name: "/tf"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/joint_states"
+  gz_topic_name: "/joint_states"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "gz.msgs.Model"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/scan"
+  gz_topic_name: "/scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+</script>
+<p>也可以用命令行临时桥接单个话题，语法 <code>话题@ROS类型[gz类型</code>（<code>[</code> 表示 gz→ROS，<code>]</code> 表示 ROS→gz，<code>@</code> 表示双向）：</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run ros_gz_bridge parameter_bridge /scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan
+</script>
+
+<h2>9.6 仿真启动文件</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_gazebo/launch/sim.launch.py">
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    desc_pkg = FindPackageShare('my_bot_description')
+    gz_pkg = FindPackageShare('my_bot_gazebo')
+
+    world = LaunchConfiguration('world')
+    rviz = LaunchConfiguration('rviz')
+
+    robot_description = ParameterValue(
+        Command(['xacro ', PathJoinSubstitution([desc_pkg, 'urdf', 'my_bot.urdf.xacro'])]),
+        value_type=str)
+
+    gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('ros_gz_sim'), 'launch', 'gz_sim.launch.py'])),
+        launch_arguments={'gz_args': ['-r ', world]}.items(),     # -r：启动后立即运行
+    )
+
+    robot_state_publisher = Node(
+        package='robot_state_publisher', executable='robot_state_publisher',
+        parameters=[{'robot_description': robot_description, 'use_sim_time': True}],
+        output='screen')
+
+    spawn = Node(
+        package='ros_gz_sim', executable='create',
+        arguments=['-topic', 'robot_description', '-name', 'my_bot', '-x', '0', '-y', '0', '-z', '0.05'],
+        output='screen')
+
+    bridge = Node(
+        package='ros_gz_bridge', executable='parameter_bridge',
+        parameters=[{
+            'config_file': PathJoinSubstitution([gz_pkg, 'config', 'bridge.yaml']),
+            'use_sim_time': True,
+        }],
+        output='screen')
+
+    rviz_node = Node(
+        package='rviz2', executable='rviz2',
+        arguments=['-d', PathJoinSubstitution([desc_pkg, 'rviz', 'display.rviz'])],
+        parameters=[{'use_sim_time': True}],
+        condition=IfCondition(rviz))
+
+    return LaunchDescription([
+        DeclareLaunchArgument('world',
+                              default_value=PathJoinSubstitution([gz_pkg, 'worlds', 'room.sdf'])),
+        DeclareLaunchArgument('rviz', default_value='true'),
+        gazebo, robot_state_publisher, spawn, bridge, rviz_node,
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="my_bot_gazebo/CMakeLists.txt（ament_package() 之前）">
+install(DIRECTORY launch worlds config
+  DESTINATION share/${PROJECT_NAME})
+</script>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_gazebo/package.xml 运行依赖">
+<exec_depend>my_bot_description</exec_depend>
+<exec_depend>ros_gz_sim</exec_depend>
+<exec_depend>ros_gz_bridge</exec_depend>
+<exec_depend>robot_state_publisher</exec_depend>
+<exec_depend>rviz2</exec_depend>
+<exec_depend>xacro</exec_depend>
+</script>
+
+<h2>9.7 运行与遥控</h2>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws && colcon build --symlink-install && source install/setup.bash
+ros2 launch my_bot_gazebo sim.launch.py
+
+# 新终端：键盘遥控（i 前进，j/l 转向，k 停止，q/z 调速）
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+</script>
+<p>在 RViz 中：Fixed Frame 设为 <code>odom</code>，添加 LaserScan（Topic <code>/scan</code>）、Odometry（Topic <code>/odom</code>）。开动小车，应能看到激光点勾勒出墙壁和障碍物的轮廓，并且激光点相对于 odom 基本保持静止。</p>
+<h3>验证清单</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 topic hz /scan              # 约 10 Hz
+ros2 topic hz /odom              # 约 30 Hz
+ros2 topic echo /clock --once    # 有仿真时间
+ros2 run tf2_ros tf2_echo odom laser_link
+ros2 run tf2_tools view_frames   # odom -> base_footprint -> base_link -> 各 link
+</script>
+
+<h2>9.8 其他常用传感器</h2>
+<table>
+  <thead><tr><th>传感器</th><th>sensor type</th><th>ROS 消息</th><th>gz 消息</th></tr></thead>
+  <tbody>
+    <tr><td>IMU</td><td><code>imu</code>（世界需加载 <code>gz-sim-imu-system</code>）</td><td><code>sensor_msgs/msg/Imu</code></td><td><code>gz.msgs.IMU</code></td></tr>
+    <tr><td>RGB 相机</td><td><code>camera</code></td><td><code>sensor_msgs/msg/Image</code></td><td><code>gz.msgs.Image</code></td></tr>
+    <tr><td>深度相机</td><td><code>rgbd_camera</code> / <code>depth_camera</code></td><td><code>Image</code> + <code>PointCloud2</code></td><td><code>gz.msgs.Image</code> / <code>gz.msgs.PointCloudPacked</code></td></tr>
+    <tr><td>3D 激光</td><td><code>gpu_lidar</code>（设置 vertical samples）</td><td><code>sensor_msgs/msg/PointCloud2</code></td><td><code>gz.msgs.PointCloudPacked</code></td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="xml" data-file="示例：RGB 相机">
+<gazebo reference="camera_link">
+  <sensor name="camera" type="camera">
+    <gz_frame_id>camera_optical_frame</gz_frame_id>
+    <topic>camera/image_raw</topic>
+    <update_rate>30</update_rate>
+    <camera>
+      <horizontal_fov>1.047</horizontal_fov>
+      <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+      <clip><near>0.05</near><far>50</far></clip>
+    </camera>
+  </sensor>
+</gazebo>
+</script>
+<p>图像建议用 <code>ros_gz_image</code> 包的 <code>image_bridge</code> 桥接，效率更高。</p>
+
+<h2>9.9 常见问题</h2>
+<table>
+  <thead><tr><th>现象</th><th>排查</th></tr></thead>
+  <tbody>
+    <tr><td>Gazebo 中没有小车</td><td>看 <code>create</code> 节点输出；<code>ros2 topic echo /robot_description --once</code> 是否有内容；xacro 是否有语法错误</td></tr>
+    <tr><td>小车不动</td><td><code>gz topic -l</code> 看 gz 侧是否有 <code>/cmd_vel</code>；桥接方向是否为 ROS_TO_GZ；teleop 是否在发布 <code>/cmd_vel</code>；Gazebo 是否处于暂停状态</td></tr>
+    <tr><td>小车原地打转或倒退</td><td>左右轮关节名写反，或车轮旋转轴方向不对</td></tr>
+    <tr><td><code>/scan</code> 无数据</td><td>世界缺少 Sensors 系统插件；<code>gz topic -e -t /scan</code> 检查 gz 侧</td></tr>
+    <tr><td>RViz 中激光“跟着车跑”或拖影</td><td>某节点未设置 <code>use_sim_time</code>；TF 时间戳不一致</td></tr>
+    <tr><td>车轮在 RViz 中显示为红色 / 不转</td><td><code>/joint_states</code> 未桥接或 JointStatePublisher 插件未加载</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+gz topic -l                      # 列出 gz 侧话题
+gz topic -e -t /odom             # 打印 gz 侧消息
+gz topic -t /cmd_vel -m gz.msgs.Twist -p "linear: {x: 0.3}"   # 绕过 ROS 直接控制
+</script>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么启动仿真时所有 ROS 节点都要设置 <code>use_sim_time: True</code>？</summary>
+<div>Gazebo 的消息时间戳是仿真时间（从 0 开始，且可能慢于真实时间）。若节点用系统时间，它查询 TF 或比较时间戳时会与数据相差几十年，导致 TF 外推错误、数据被丢弃。</div></details>
+<details class="quiz"><summary>2. odom → base_footprint 的 TF 由谁发布？base_footprint → laser_link 呢？</summary>
+<div>前者由 Gazebo 的 DiffDrive 插件计算并通过 bridge 发布到 <code>/tf</code>；后者由 robot_state_publisher 根据 URDF 的固定关节发布到 <code>/tf_static</code>。</div></details>
+<details class="quiz"><summary>3. 第 8 章用的 joint_state_publisher_gui 在仿真中还需要吗？</summary>
+<div>不需要，而且不能同时运行。仿真中关节状态来自 Gazebo 的 JointStatePublisher 插件，两者同时发布会冲突。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>Gazebo 中能看到房间和小车</li>
+  <li>键盘可以控制小车运动</li>
+  <li><code>/scan</code> 10 Hz、<code>/odom</code> 30 Hz、<code>/clock</code> 均有数据</li>
+  <li>RViz 中激光点贴合墙壁，TF 树完整</li>
+  <li>会用 <code>gz topic</code> 命令定位桥接问题</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

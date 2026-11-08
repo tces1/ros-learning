@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 章 ROS2 系统架构 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch02" data-root="../">
+<main class="content">
+
+<h1>第 2 章　ROS2 系统架构</h1>
+<p class="lead">理解 ROS2 从你的代码到网络数据包的完整分层，掌握计算图、命名规则、发现机制、生命周期节点和组件这几个贯穿全书的概念。</p>
+<div class="meta-bar"><span class="tag">阅读约 35 分钟</span><span class="tag">概念为主</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>画出 ROS2 的软件分层，并说明每层职责</li>
+  <li>理解计算图中的节点、话题、服务、动作及其命名规则</li>
+  <li>掌握 <code>ROS_DOMAIN_ID</code> 等发现相关的环境变量</li>
+  <li>了解工作空间、包、overlay 的关系</li>
+  <li>知道生命周期节点和组件解决什么问题</li>
+</ul>
+
+<h2>2.1 软件分层</h2>
+<pre class="diagram">
+┌───────────────────────────────────────────────────────────┐
+│ 你的应用：驱动 / 算法 / 业务节点                               │
+├───────────────────────────────┬───────────────────────────┤
+│ rclcpp（C++ 客户端库）          │ rclpy（Python 客户端库）     │  ← 你直接使用的 API
+├───────────────────────────────┴───────────────────────────┤
+│ rcl（C 语言实现的公共逻辑：节点、话题、时钟、参数、日志）          │
+├───────────────────────────────────────────────────────────┤
+│ rmw（ROS MiddleWare 抽象接口）                               │
+├──────────────┬──────────────┬──────────────┬──────────────┤
+│ rmw_fastrtps │ rmw_cyclonedds│ rmw_connextdds│ rmw_zenoh    │  ← 可替换的中间件实现
+├──────────────┴──────────────┴──────────────┴──────────────┤
+│ 操作系统网络栈：UDP 组播 / 单播、共享内存                       │
+└───────────────────────────────────────────────────────────┘
+</pre>
+<table>
+  <thead><tr><th>层</th><th>职责</th><th>你需要关心的程度</th></tr></thead>
+  <tbody>
+    <tr><td>rclcpp / rclpy</td><td>面向语言的 API：<code>Node</code>、<code>create_publisher</code>、<code>spin</code> 等</td><td>每天都用</td></tr>
+    <tr><td>rcl</td><td>所有语言共享的核心逻辑，保证 C++ 和 Python 行为一致</td><td>一般不直接调用</td></tr>
+    <tr><td>rmw</td><td>把 ROS 概念翻译成具体中间件调用的抽象接口</td><td>了解即可</td></tr>
+    <tr><td>DDS / Zenoh 实现</td><td>真正收发数据、负责发现和 QoS</td><td>出网络问题时需要了解</td></tr>
+  </tbody>
+</table>
+<p>切换中间件实现只需设置环境变量，应用代码无需修改：</p>
+<script type="text/plain" class="code" data-lang="bash">
+# 查看当前使用的中间件
+ros2 doctor --report | grep middleware
+
+# 切换到 Cyclone DDS（需先安装 ros-jazzy-rmw-cyclonedds-cpp）
+sudo apt install ros-jazzy-rmw-cyclonedds-cpp
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+</script>
+<div class="callout warn">
+  <strong>同一系统内所有节点最好使用同一种 RMW</strong>
+  <p>不同 DDS 实现之间理论上可互通，但在服务、动作、大消息上常出现兼容问题；Zenoh 与 DDS 之间则完全不互通。</p>
+</div>
+
+<h2>2.2 DDS 是什么</h2>
+<p>DDS（Data Distribution Service）是 OMG 组织制定的发布/订阅通信标准，广泛用于军工、航空、金融交易系统。ROS2 选用它的原因：</p>
+<ul>
+  <li><strong>去中心化发现</strong>：参与者通过 SPDP/SEDP 协议自动发现彼此，无需中心服务器</li>
+  <li><strong>丰富的 QoS</strong>：可靠性、历史深度、持久性、截止期、存活性等都可配置（第 4 章详解）</li>
+  <li><strong>成熟可靠</strong>：已有多家商业与开源实现，经过大规模工业验证</li>
+  <li><strong>共享内存传输</strong>：同一台机器上的进程间可走共享内存，避免网络栈开销</li>
+</ul>
+
+<h2>2.3 计算图（ROS Graph）</h2>
+<p>运行中的 ROS2 系统可以看成一张图：节点是顶点，话题 / 服务 / 动作是连接节点的边。</p>
+<pre class="diagram">
+                 /scan (sensor_msgs/LaserScan)
+   [lidar_driver] ─────────────────────────────┬──────────────► [slam_toolbox]
+                                               │                    │ /map
+                                               ▼                    ▼
+   [diff_drive] ── /odom ──────────────► [nav2 controller] ◄── [nav2 planner]
+        ▲                                      │
+        └──────────── /cmd_vel ────────────────┘
+                (geometry_msgs/Twist)
+</pre>
+<p>用命令行观察计算图：</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 node list              # 所有节点
+ros2 node info /talker      # 某节点的发布、订阅、服务、动作
+ros2 topic list -t          # 所有话题及类型
+ros2 service list -t        # 所有服务
+ros2 action list -t         # 所有动作
+rqt_graph                   # 图形化查看
+</script>
+
+<h2>2.4 命名规则</h2>
+<p>节点、话题、服务、动作都有名字，ROS2 的名字解析规则必须掌握，否则多机器人、命名空间、重映射都会出错。</p>
+<table>
+  <thead><tr><th>写法</th><th>称为</th><th>节点 <code>/robot1/driver</code> 中解析结果</th></tr></thead>
+  <tbody>
+    <tr><td><code>/scan</code></td><td>绝对名（全局）</td><td><code>/scan</code></td></tr>
+    <tr><td><code>scan</code></td><td>相对名</td><td><code>/robot1/scan</code>（加上节点的命名空间）</td></tr>
+    <tr><td><code>~/status</code></td><td>私有名</td><td><code>/robot1/driver/status</code>（加上节点完整名）</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <strong>写代码时优先使用相对名</strong>
+  <p>相对名可以在启动时整体放进命名空间，实现「同一份代码启动多台机器人」。写死 <code>/scan</code> 这种绝对名会让多机器人场景无法工作。</p>
+</div>
+<p>命名约束：只能包含字母、数字、下划线和 <code>/</code>，不能以数字开头，不能有连续的 <code>//</code> 或 <code>__</code>。</p>
+
+<h2>2.5 发现机制与网络隔离</h2>
+<h3>ROS_DOMAIN_ID</h3>
+<p>同一个局域网内，<code>ROS_DOMAIN_ID</code> 相同的节点会自动互相发现。默认值为 0。</p>
+<script type="text/plain" class="code" data-lang="bash">
+# 推荐范围 0–101（Linux 下更大的值可能与系统临时端口冲突）
+export ROS_DOMAIN_ID=42
+echo 'export ROS_DOMAIN_ID=42' >> ~/.bashrc
+</script>
+<div class="callout danger">
+  <strong>实验室常见事故</strong>
+  <p>多个人在同一 Wi-Fi 下都用默认 Domain 0，结果你的 <code>/cmd_vel</code> 开动了同学的机器人。务必给每个人或每台机器人分配不同的 Domain ID。</p>
+</div>
+<h3>限制发现范围（Jazzy 起）</h3>
+<script type="text/plain" class="code" data-lang="bash">
+# 只在本机发现（单机学习时推荐，避免干扰也更快）
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+# 其他取值：SUBNET（默认，同网段）、OFF（关闭自动发现）、SYSTEM_DEFAULT
+
+# 指定静态对端（跨网段或组播被禁止时）
+export ROS_STATIC_PEERS="192.168.1.20;192.168.1.21"
+</script>
+<div class="callout note">
+  <strong>Humble 用户</strong>
+  <p>Humble 中使用 <code>export ROS_LOCALHOST_ONLY=1</code> 达到「只在本机发现」的效果，该变量在 Jazzy 中已被弃用。</p>
+</div>
+
+<h2>2.6 工作空间与包</h2>
+<h3>包（Package）</h3>
+<p>包是 ROS 代码组织、构建、发布的最小单位。每个包都有 <code>package.xml</code>（元信息与依赖）以及构建描述文件。</p>
+<pre class="diagram">
+my_robot_driver/                ament_cmake 包（C++ 为主）
+├── package.xml                 包名、版本、依赖
+├── CMakeLists.txt              构建规则
+├── include/my_robot_driver/    头文件
+├── src/                        源文件
+├── launch/                     启动文件
+└── config/                     参数 YAML
+
+my_robot_tools/                 ament_python 包（纯 Python）
+├── package.xml
+├── setup.py                    安装规则与入口点
+├── setup.cfg
+├── resource/my_robot_tools     包标记文件
+└── my_robot_tools/             Python 模块
+    └── __init__.py
+</pre>
+<h3>工作空间（Workspace）</h3>
+<pre class="diagram">
+~/ros2_ws/
+├── src/        ← 你只在这里写代码（放多个包）
+├── build/      ← 编译中间产物（可随时删除）
+├── install/    ← 安装结果，source install/setup.bash 后生效
+└── log/        ← 构建日志
+</pre>
+<h3>Underlay 与 Overlay</h3>
+<p>ROS2 的环境是叠加的：先 source 系统安装的 ROS（underlay），再 source 你的工作空间（overlay）。overlay 中的同名包会覆盖 underlay 中的。</p>
+<script type="text/plain" class="code" data-lang="bash">
+source /opt/ros/jazzy/setup.bash     # underlay：系统 ROS
+source ~/ros2_ws/install/setup.bash  # overlay：你的工作空间
+</script>
+<p>这意味着你可以把某个官方包（比如 nav2 的某个插件）的源码 clone 到自己的工作空间里修改，它会优先于系统版本被使用。</p>
+
+<h2>2.7 时间与时钟</h2>
+<table>
+  <thead><tr><th>时钟类型</th><th>含义</th><th>场景</th></tr></thead>
+  <tbody>
+    <tr><td>ROS Time</td><td>默认等于系统时间；若参数 <code>use_sim_time=true</code>，则跟随 <code>/clock</code> 话题</td><td>绝大多数节点、消息时间戳</td></tr>
+    <tr><td>System Time</td><td>系统墙上时钟</td><td>日志、与外部系统交互</td></tr>
+    <tr><td>Steady Time</td><td>单调递增，不受系统时间调整影响</td><td>测量耗时、超时判断</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>仿真和回放 rosbag 时必须统一 use_sim_time</strong>
+  <p>Gazebo 和 <code>ros2 bag play --clock</code> 会发布 <code>/clock</code>。若有的节点用仿真时间、有的用系统时间，TF 会报「外推到未来 / 过去」的错误，导航完全无法工作。</p>
+</div>
+
+<h2>2.8 生命周期节点（Lifecycle / Managed Node）</h2>
+<p>普通节点一启动就开始工作。但在真实机器人上，我们常需要「先全部配置好、确认硬件就绪，再统一激活」。生命周期节点提供了一个标准状态机：</p>
+<pre class="diagram">
+              configure            activate
+ [Unconfigured] ───────► [Inactive] ───────► [Active]
+       ▲   cleanup  │        ▲  deactivate     │
+       └────────────┘        └─────────────────┘
+          任意状态 ── shutdown ──► [Finalized]
+</pre>
+<table>
+  <thead><tr><th>状态</th><th>应该做的事</th></tr></thead>
+  <tbody>
+    <tr><td>Unconfigured</td><td>刚创建，什么也不做</td></tr>
+    <tr><td>Inactive</td><td>已读参数、分配内存、创建发布者，但不发布数据、不处理请求</td></tr>
+    <tr><td>Active</td><td>正常工作</td></tr>
+    <tr><td>Finalized</td><td>即将销毁</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 lifecycle nodes                    # 列出所有生命周期节点
+ros2 lifecycle get /map_server          # 查看当前状态
+ros2 lifecycle set /map_server configure
+ros2 lifecycle set /map_server activate
+</script>
+<p>Nav2 的所有服务器都是生命周期节点，由 <code>lifecycle_manager</code> 按顺序统一管理，这就是为什么 Nav2 启动后要等一会儿才「Ready」。</p>
+
+<h2>2.9 组件（Component）与进程内通信</h2>
+<p>默认每个节点是一个独立进程，图像、点云这类大消息在进程间传递需要序列化和拷贝。<strong>组件</strong>是编译成共享库的节点，可以在运行时被加载到同一个「容器进程」中，启用进程内通信后可实现零拷贝。</p>
+<script type="text/plain" class="code" data-lang="bash">
+# 启动一个空容器
+ros2 run rclcpp_components component_container
+
+# 新终端：查看可加载的组件，并加载两个 demo 组件
+ros2 component types
+ros2 component load /ComponentManager composition composition::Talker
+ros2 component load /ComponentManager composition composition::Listener
+ros2 component list
+</script>
+<p>第 6 章会介绍如何在 launch 文件中用 <code>ComposableNodeContainer</code> 组合节点。</p>
+
+<h2>2.10 与 ROS1 架构对照</h2>
+<table>
+  <thead><tr><th>概念</th><th>ROS1</th><th>ROS2</th></tr></thead>
+  <tbody>
+    <tr><td>发现</td><td><code>roscore</code> / <code>ROS_MASTER_URI</code></td><td>DDS 自动发现 / <code>ROS_DOMAIN_ID</code></td></tr>
+    <tr><td>参数</td><td>全局参数服务器</td><td>每个节点各自持有参数</td></tr>
+    <tr><td>进程内通信</td><td>nodelet</td><td>component</td></tr>
+    <tr><td>节点状态</td><td>无</td><td>lifecycle</td></tr>
+    <tr><td>一个进程多个节点</td><td>不支持（nodelet 除外）</td><td>支持</td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 节点 <code>/arm/gripper</code> 发布话题 <code>~/state</code>、<code>state</code> 和 <code>/state</code>，完整名称分别是什么？</summary>
+<div><code>/arm/gripper/state</code>、<code>/arm/state</code>、<code>/state</code>。</div></details>
+<details class="quiz"><summary>2. 你和同学在同一 Wi-Fi 下，你看到了陌生的 <code>/turtle1/cmd_vel</code> 话题，原因和解决办法？</summary>
+<div>双方使用了相同的 <code>ROS_DOMAIN_ID</code>（通常都是默认 0），DDS 自动发现了彼此。解决：各自设置不同的 <code>ROS_DOMAIN_ID</code>，或单机学习时设置 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>（Humble 用 <code>ROS_LOCALHOST_ONLY=1</code>）。</div></details>
+<details class="quiz"><summary>3. 为什么相机驱动和图像处理节点适合做成组件放在同一进程？</summary>
+<div>图像数据量大（1080p RGB 一帧约 6 MB），跨进程传输需要序列化和内存拷贝，CPU 开销和延迟都高。放在同一容器并启用进程内通信，可以直接传递指针，实现零拷贝。</div></details>
+<details class="quiz"><summary>4. 生命周期节点处于 Inactive 状态时应该发布数据吗？</summary>
+<div>不应该。Inactive 表示已完成配置但尚未激活，此时发布者已创建但不应发布数据，也不应处理服务请求。只有在 Active 状态下才开始正常工作。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能画出 rclcpp/rclpy → rcl → rmw → DDS 的分层图</li>
+  <li>理解绝对名、相对名、私有名的解析规则</li>
+  <li>会设置 <code>ROS_DOMAIN_ID</code> 并理解其作用</li>
+  <li>理解 underlay / overlay 的叠加关系</li>
+  <li>知道仿真时为什么必须 <code>use_sim_time=true</code></li>
+  <li>能说出生命周期节点的 4 个主要状态</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

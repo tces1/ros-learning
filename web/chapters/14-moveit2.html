@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 14 章 MoveIt 2 机械臂 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch14" data-root="../">
+<main class="content">
+
+<h1>第 14 章　MoveIt 2 机械臂运动规划</h1>
+<p class="lead">MoveIt 是 ROS 中机械臂运动规划的标准框架。本章用官方 Panda 机械臂演示交互式规划，然后用 C++ 编写程序：移动到目标位姿、添加障碍物、规划笛卡尔直线路径，最后介绍如何为自己的机械臂生成配置。</p>
+<div class="meta-bar"><span class="tag">动手约 3–4 小时</span><span class="tag">机械臂方向</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解运动学、运动规划、碰撞检测、轨迹执行的完整链路</li>
+  <li>在 RViz 中交互式规划和执行</li>
+  <li>用 MoveGroupInterface 编程实现位姿目标、关节目标、笛卡尔路径</li>
+  <li>用 PlanningSceneInterface 添加碰撞物体</li>
+  <li>用 Setup Assistant 为自定义机械臂生成配置包</li>
+</ul>
+
+<h2>14.1 机械臂规划要解决的问题</h2>
+<pre class="diagram">
+   目标：「把末端移动到桌面上方 10 cm、朝下」
+        │
+        ▼  逆运动学（IK）：末端位姿 → 各关节角度（可能有多解或无解）
+        ▼  运动规划：从当前关节角到目标关节角，找到一条不碰撞的路径
+        ▼  时间参数化：给路径加上速度、加速度，使其满足关节限位
+        ▼  执行：通过 FollowJointTrajectory 动作发送给控制器（第 12 章）
+   机械臂运动
+</pre>
+<table>
+  <thead><tr><th>概念</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>正运动学（FK）</td><td>已知关节角，求末端位姿。唯一解，计算简单</td></tr>
+    <tr><td>逆运动学（IK）</td><td>已知末端位姿，求关节角。可能多解 / 无解。MoveIt 默认用 KDL 数值解，可换 TRAC-IK、pick_ik 或解析解 IKFast</td></tr>
+    <tr><td>规划组（Planning Group）</td><td>一组一起规划的关节，如 <code>panda_arm</code>（7 关节）、<code>hand</code>（夹爪）</td></tr>
+    <tr><td>末端执行器（End Effector）</td><td>夹爪、吸盘等，挂在规划组末端</td></tr>
+    <tr><td>规划场景（Planning Scene）</td><td>机器人当前状态 + 环境中的碰撞物体</td></tr>
+    <tr><td>ACM（允许碰撞矩阵）</td><td>哪些 link 之间的接触不算碰撞（如相邻连杆）</td></tr>
+  </tbody>
+</table>
+
+<h2>14.2 MoveIt 架构</h2>
+<pre class="diagram">
+  RViz MotionPlanning 插件      你的 C++ / Python 程序
+            │                           │
+            └──────────┬────────────────┘
+                       ▼   Action / Service
+             ┌───────────────────┐
+             │    move_group     │  核心节点
+             │  ├ 规划管线：OMPL / Pilz / CHOMP / STOMP
+             │  ├ 运动学插件：KDL / TRAC-IK / pick_ik
+             │  ├ Planning Scene Monitor ← /joint_states、TF、点云/深度图（Octomap）
+             │  └ 轨迹执行管理器
+             └─────────┬─────────┘
+                       ▼  FollowJointTrajectory
+             joint_trajectory_controller（ros2_control）
+                       ▼
+                  机械臂硬件 / 仿真
+</pre>
+
+<h2>14.3 安装与演示</h2>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-moveit ros-jazzy-moveit-resources-panda-moveit-config
+ros2 launch moveit_resources_panda_moveit_config demo.launch.py
+</script>
+<p>RViz 打开后：</p>
+<ol>
+  <li>在 MotionPlanning 面板的 Planning 标签中，Planning Group 选 <code>panda_arm</code></li>
+  <li>拖动末端的交互标记（彩色箭头和圆环）到新位置，橙色的「目标机器人」会跟随</li>
+  <li>点 <strong>Plan</strong>，观察规划出的轨迹动画；点 <strong>Execute</strong> 执行</li>
+  <li>在 Scene Objects 标签中可以添加方块，再次规划时机械臂会绕开它</li>
+  <li>在 Context 标签中切换规划器（如 OMPL 的 RRTConnect、Pilz 的 LIN 直线运动）</li>
+</ol>
+<div class="callout note">
+  <strong>demo.launch.py 使用模拟硬件</strong>
+  <p>演示使用 ros2_control 的 mock_components，所以「执行」只是在 RViz 中更新状态。换成 Gazebo 或真实机械臂时，只需替换硬件插件，MoveIt 侧不变。</p>
+</div>
+
+<h2>14.4 规划器选择</h2>
+<table>
+  <thead><tr><th>规划器</th><th>特点</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr><td>OMPL（RRTConnect 等）</td><td>基于采样，快速找到可行路径，但路径可能绕远、每次结果不同</td><td>默认，复杂环境避障</td></tr>
+    <tr><td>Pilz Industrial Motion</td><td>确定性的 PTP / LIN / CIRC 运动</td><td>工业场景：直线插补、圆弧、可预测的运动</td></tr>
+    <tr><td>CHOMP / STOMP</td><td>基于优化，路径平滑</td><td>对轨迹质量要求高的场景</td></tr>
+  </tbody>
+</table>
+
+<h2>14.5 用 C++ 编程控制</h2>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src
+ros2 pkg create arm_demo --build-type ament_cmake --license Apache-2.0 \
+  --dependencies rclcpp moveit_ros_planning_interface geometry_msgs moveit_msgs shape_msgs
+</script>
+<script type="text/plain" class="code" data-lang="cpp" data-file="arm_demo/src/move_demo.cpp">
+#include <memory>
+#include <thread>
+
+#include <geometry_msgs/msg/pose.hpp>
+#include <moveit/move_group_interface/move_group_interface.hpp>
+#include <moveit/planning_scene_interface/planning_scene_interface.hpp>
+#include <moveit_msgs/msg/collision_object.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <shape_msgs/msg/solid_primitive.hpp>
+
+using moveit::planning_interface::MoveGroupInterface;
+using moveit::planning_interface::PlanningSceneInterface;
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  // 允许从 launch 传入的 robot_description 等参数自动声明
+  auto node = std::make_shared<rclcpp::Node>(
+    "move_demo",
+    rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  auto logger = node->get_logger();
+
+  // MoveGroupInterface 需要后台 spin 来接收 joint_states 等
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  std::thread spinner([&executor]() {executor.spin();});
+
+  MoveGroupInterface arm(node, "panda_arm");
+  arm.setMaxVelocityScalingFactor(0.5);
+  arm.setMaxAccelerationScalingFactor(0.5);
+  RCLCPP_INFO(logger, "规划坐标系: %s, 末端: %s",
+    arm.getPlanningFrame().c_str(), arm.getEndEffectorLink().c_str());
+
+  // ---------- 1. 添加障碍物：一块挡板 ----------
+  moveit_msgs::msg::CollisionObject wall;
+  wall.header.frame_id = arm.getPlanningFrame();
+  wall.id = "wall";
+  shape_msgs::msg::SolidPrimitive box;
+  box.type = box.BOX;
+  box.dimensions = {0.1, 0.5, 0.5};
+  geometry_msgs::msg::Pose wall_pose;
+  wall_pose.orientation.w = 1.0;
+  wall_pose.position.x = 0.45;
+  wall_pose.position.y = 0.0;
+  wall_pose.position.z = 0.25;
+  wall.primitives.push_back(box);
+  wall.primitive_poses.push_back(wall_pose);
+  wall.operation = wall.ADD;
+  PlanningSceneInterface scene;
+  scene.applyCollisionObject(wall);
+
+  // ---------- 2. 位姿目标 ----------
+  geometry_msgs::msg::Pose target;
+  target.orientation.x = 1.0;     // 末端朝下（绕 x 轴转 180°）
+  target.orientation.w = 0.0;
+  target.position.x = 0.3;
+  target.position.y = -0.3;
+  target.position.z = 0.4;
+  arm.setPoseTarget(target);
+
+  MoveGroupInterface::Plan plan;
+  if (static_cast<bool>(arm.plan(plan))) {
+    RCLCPP_INFO(logger, "规划成功，执行");
+    arm.execute(plan);
+  } else {
+    RCLCPP_ERROR(logger, "规划失败");
+  }
+
+  // ---------- 3. 笛卡尔直线路径：末端向下 10 cm，再向 +y 移 20 cm ----------
+  std::vector<geometry_msgs::msg::Pose> waypoints;
+  auto p = arm.getCurrentPose().pose;
+  p.position.z -= 0.10;
+  waypoints.push_back(p);
+  p.position.y += 0.20;
+  waypoints.push_back(p);
+
+  moveit_msgs::msg::RobotTrajectory trajectory;
+  double fraction = arm.computeCartesianPath(waypoints, 0.01 /* 插值步长 m */, trajectory);
+  RCLCPP_INFO(logger, "笛卡尔路径完成度 %.1f%%", fraction * 100.0);
+  if (fraction > 0.95) {
+    arm.execute(trajectory);
+  }
+
+  // ---------- 4. 命名位姿（在 SRDF 中定义，如 ready） ----------
+  arm.setNamedTarget("ready");
+  arm.move();          // plan + execute 一步完成
+
+  scene.removeCollisionObjects({"wall"});
+  rclcpp::shutdown();
+  spinner.join();
+  return 0;
+}
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="arm_demo/CMakeLists.txt（关键部分）">
+find_package(moveit_ros_planning_interface REQUIRED)
+add_executable(move_demo src/move_demo.cpp)
+ament_target_dependencies(move_demo rclcpp moveit_ros_planning_interface geometry_msgs moveit_msgs shape_msgs)
+install(TARGETS move_demo DESTINATION lib/${PROJECT_NAME})
+</script>
+<p>程序需要 robot_description、robot_description_semantic、运动学参数。最简单的方式是写一个 launch，用 <code>moveit_configs_utils</code> 加载：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="arm_demo/launch/move_demo.launch.py">
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from moveit_configs_utils import MoveItConfigsBuilder
+
+
+def generate_launch_description():
+    moveit_config = MoveItConfigsBuilder(
+        'moveit_resources_panda', package_name='moveit_resources_panda_moveit_config'
+    ).to_moveit_configs()
+
+    return LaunchDescription([
+        Node(
+            package='arm_demo',
+            executable='move_demo',
+            output='screen',
+            parameters=[
+                moveit_config.robot_description,
+                moveit_config.robot_description_semantic,
+                moveit_config.robot_description_kinematics,
+            ],
+        ),
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+# 终端 1：MoveIt 演示环境
+ros2 launch moveit_resources_panda_moveit_config demo.launch.py
+# 终端 2：运行程序
+ros2 launch arm_demo move_demo.launch.py
+</script>
+<div class="callout note">
+  <strong>头文件后缀</strong>
+  <p>Jazzy 版 MoveIt 头文件使用 <code>.hpp</code>；Humble 中为 <code>.h</code>（如 <code>move_group_interface.h</code>）。Python 用户可使用 <code>moveit_py</code> 绑定，API 结构类似。</p>
+</div>
+
+<h2>14.6 抓取物体：附着与分离</h2>
+<p>夹爪抓起物体后，物体应随末端移动，并参与碰撞检测：</p>
+<script type="text/plain" class="code" data-lang="cpp">
+// 物体已作为 CollisionObject 加入场景，id 为 "cube"
+std::vector<std::string> touch_links = {"panda_hand", "panda_leftfinger", "panda_rightfinger"};
+arm.attachObject("cube", "panda_hand", touch_links);   // 附着：与夹爪接触不算碰撞
+// ... 移动到放置位置 ...
+arm.detachObject("cube");                              // 分离
+</script>
+<p>完整的抓取放置流程（接近 → 张开 → 下降 → 闭合 → 附着 → 抬起 → 移动 → 放下 → 分离）推荐使用 <strong>MoveIt Task Constructor</strong>，它把多阶段任务作为整体规划，避免中途失败。</p>
+
+<h2>14.7 为自己的机械臂生成配置</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch moveit_setup_assistant setup_assistant.launch.py
+</script>
+<table>
+  <thead><tr><th>步骤</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td>1. 加载 URDF</td><td>选择你机械臂的 URDF / xacro</td></tr>
+    <tr><td>2. Self-Collisions</td><td>自动采样生成 ACM（禁用永远不会碰撞或相邻的 link 对）</td></tr>
+    <tr><td>3. Virtual Joints</td><td>机械臂底座固定在世界上时添加 <code>world → base_link</code> 固定虚关节</td></tr>
+    <tr><td>4. Planning Groups</td><td>定义 arm（关节链）和 gripper 组，并选择运动学求解器</td></tr>
+    <tr><td>5. Robot Poses</td><td>定义命名位姿如 home、ready</td></tr>
+    <tr><td>6. End Effectors</td><td>指定夹爪组及其父 link</td></tr>
+    <tr><td>7. ros2_control / Controllers</td><td>生成 joint_trajectory_controller 配置</td></tr>
+    <tr><td>8. Generate</td><td>输出 <code>xxx_moveit_config</code> 包</td></tr>
+  </tbody>
+</table>
+
+<h2>14.8 MoveIt Servo：实时遥操作</h2>
+<p>规划 + 执行是「先想好再动」。如果需要用手柄、视觉伺服实时控制末端速度，使用 MoveIt Servo：它接收末端速度指令（TwistStamped）或关节速度，实时计算关节指令，并持续做奇异点与碰撞检查。</p>
+
+<h2>14.9 常见问题</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因与处理</th></tr></thead>
+  <tbody>
+    <tr><td>“No IK solution”</td><td>目标超出工作空间、姿态不可达；尝试放宽姿态、换 IK 求解器、增加 IK 超时</td></tr>
+    <tr><td>规划成功但执行失败</td><td>控制器未激活或名称不匹配（<code>moveit_controllers.yaml</code>）；轨迹起点与当前状态偏差过大</td></tr>
+    <tr><td>笛卡尔路径完成度很低</td><td>路径途经奇异点、关节限位或碰撞；减小步长或调整路径</td></tr>
+    <tr><td>程序卡在 getCurrentPose</td><td>节点没有 spin，收不到 <code>/joint_states</code></td></tr>
+    <tr><td>机械臂绕大圈</td><td>OMPL 随机性导致；增加规划时间与尝试次数、使用 Pilz PTP、或加路径约束</td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么逆运动学可能有多个解？</summary>
+<div>对于 6 自由度及以上的机械臂，同一个末端位姿可以由不同的关节配置实现（如「肘部朝上」与「肘部朝下」）。7 自由度机械臂（如 Panda）还有冗余自由度，存在无穷多解。</div></details>
+<details class="quiz"><summary>2. 什么时候选 Pilz 的 LIN 而不是 OMPL？</summary>
+<div>需要末端严格走直线时（如焊接、涂胶、插入孔），或需要每次运动完全可预测时。OMPL 只保证无碰撞，不保证末端路径形状。</div></details>
+<details class="quiz"><summary>3. 为什么抓取后要 attachObject？</summary>
+<div>否则 MoveIt 认为物体仍留在原地：一方面夹爪与物体的接触会被判为碰撞导致规划失败；另一方面移动过程中被抓物体与环境的碰撞不会被检查。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>在 RViz 中完成交互式规划、执行、添加障碍物</li>
+  <li>move_demo 程序完成位姿目标、笛卡尔路径、命名位姿运动</li>
+  <li>理解 IK、规划组、规划场景、ACM 的含义</li>
+  <li>知道 OMPL 与 Pilz 的适用场景</li>
+  <li>了解 Setup Assistant 的配置步骤</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

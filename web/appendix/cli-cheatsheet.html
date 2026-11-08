@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>附录 C 命令速查 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="cli" data-root="../">
+<main class="content">
+
+<h1>附录 C　命令速查</h1>
+<p class="lead">日常开发最常用的命令。任何命令都可加 <code>-h</code> 查看帮助，Tab 键可自动补全话题名、类型名。</p>
+
+<h2>C.1 节点</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run <包> <可执行文件>
+ros2 run <包> <可执行文件> --ros-args -r __node:=新名字 -r __ns:=/命名空间
+ros2 run <包> <可执行文件> --ros-args -r 旧话题:=新话题 -p 参数:=值 --params-file x.yaml
+ros2 run <包> <可执行文件> --ros-args --log-level debug
+ros2 node list
+ros2 node info /节点名
+</script>
+
+<h2>C.2 话题</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 topic list -t                         # 带类型
+ros2 topic echo /话题                       # 打印消息
+ros2 topic echo /话题 --once               # 只打印一条
+ros2 topic echo /odom --field pose.pose.position   # 只打印某字段
+ros2 topic hz /话题                         # 频率
+ros2 topic bw /话题                         # 带宽
+ros2 topic delay /话题                      # 延迟（基于 header.stamp）
+ros2 topic info /话题 -v                    # 发布者 / 订阅者 / QoS
+ros2 topic type /话题
+ros2 topic find geometry_msgs/msg/Twist    # 查找某类型的所有话题
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}}"
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{angular: {z: 0.5}}"
+</script>
+
+<h2>C.3 服务与动作</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 service list -t
+ros2 service type /服务
+ros2 service find std_srvs/srv/Trigger
+ros2 service call /服务 std_srvs/srv/Trigger
+ros2 service echo /服务                     # 查看请求与响应（需服务端开启 introspection，Iron 及以上）
+
+ros2 action list -t
+ros2 action info /动作
+ros2 action send_goal /动作 类型 "{...}" --feedback
+</script>
+
+<h2>C.4 参数</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 param list /节点
+ros2 param get /节点 名称
+ros2 param set /节点 名称 值
+ros2 param describe /节点 名称
+ros2 param dump /节点 > 节点.yaml
+ros2 param load /节点 节点.yaml
+ros2 param delete /节点 名称
+</script>
+
+<h2>C.5 接口与包</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 interface list
+ros2 interface package sensor_msgs
+ros2 interface show sensor_msgs/msg/LaserScan
+ros2 interface proto geometry_msgs/msg/PoseStamped    # 打印可填写的模板
+
+ros2 pkg list
+ros2 pkg executables <包>
+ros2 pkg prefix <包>
+ros2 pkg xml <包>
+ros2 pkg create <包> --build-type ament_python|ament_cmake --dependencies rclpy std_msgs
+</script>
+
+<h2>C.6 Launch、生命周期、组件</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch <包> <文件> 参数:=值
+ros2 launch <包> <文件> --show-args
+
+ros2 lifecycle nodes
+ros2 lifecycle get /节点
+ros2 lifecycle set /节点 configure|activate|deactivate|cleanup|shutdown
+
+ros2 component list
+ros2 component types
+ros2 component load /ComponentManager <包> <插件类名>
+</script>
+
+<h2>C.7 TF</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run tf2_tools view_frames
+ros2 run tf2_ros tf2_echo <父> <子>
+ros2 run tf2_ros tf2_monitor
+ros2 run tf2_ros static_transform_publisher --x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0 \
+  --frame-id <父> --child-frame-id <子>
+</script>
+
+<h2>C.8 录包</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag record -o 名称 /话题1 /话题2
+ros2 bag record -a -x "正则"
+ros2 bag info 名称
+ros2 bag play 名称 --clock -r 0.5 --loop
+ros2 bag convert -i 输入 -o 配置.yaml
+</script>
+
+<h2>C.9 构建</h2>
+<script type="text/plain" class="code" data-lang="bash">
+colcon build --symlink-install
+colcon build --packages-select <包> --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --packages-up-to <包>
+colcon test --packages-select <包> && colcon test-result --verbose
+rosdep install --from-paths src --ignore-src -r -y
+vcs import src < x.repos
+</script>
+
+<h2>C.10 诊断与工具</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 doctor --report
+ros2 daemon stop && ros2 daemon start      # 刷新发现缓存
+rqt_graph
+ros2 run rqt_console rqt_console
+ros2 run rqt_plot rqt_plot
+ros2 run rqt_reconfigure rqt_reconfigure
+ros2 run rqt_image_view rqt_image_view
+rviz2 -d 配置.rviz
+ros2 control list_controllers
+gz topic -l
+</script>
+
+<h2>C.11 常用环境变量</h2>
+<table>
+  <thead><tr><th>变量</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>ROS_DISTRO</code></td><td>当前发行版（只读）</td></tr>
+    <tr><td><code>ROS_DOMAIN_ID</code></td><td>通信域，隔离不同系统</td></tr>
+    <tr><td><code>ROS_AUTOMATIC_DISCOVERY_RANGE</code></td><td>发现范围：LOCALHOST / SUBNET / OFF</td></tr>
+    <tr><td><code>ROS_STATIC_PEERS</code></td><td>静态对端 IP 列表</td></tr>
+    <tr><td><code>RMW_IMPLEMENTATION</code></td><td>中间件实现，如 <code>rmw_cyclonedds_cpp</code></td></tr>
+    <tr><td><code>RCUTILS_CONSOLE_OUTPUT_FORMAT</code></td><td>日志格式</td></tr>
+    <tr><td><code>RCUTILS_COLORIZED_OUTPUT</code></td><td>日志彩色输出</td></tr>
+    <tr><td><code>ROS_LOG_DIR</code></td><td>日志目录</td></tr>
+    <tr><td><code>GZ_SIM_RESOURCE_PATH</code></td><td>Gazebo 模型 / mesh 搜索路径</td></tr>
+  </tbody>
+</table>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

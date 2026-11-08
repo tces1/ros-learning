@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 10 章 colcon 与包开发规范 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch10" data-root="../">
+<main class="content">
+
+<h1>第 10 章　colcon 与包开发规范</h1>
+<p class="lead">从「能跑」到「可维护」：掌握构建工具、依赖管理、多仓库管理、单元测试和持续集成，让你的 ROS2 项目达到团队协作的工程标准。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 2.5 小时</span><span class="tag">工程化</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>熟练使用 colcon 的常用构建、测试选项</li>
+  <li>正确书写 <code>package.xml</code> 依赖，用 rosdep 一键安装依赖</li>
+  <li>用 vcstool 管理多仓库工作空间</li>
+  <li>为 Python 和 C++ 代码编写单元测试</li>
+  <li>配置 GitHub Actions 自动构建与测试</li>
+</ul>
+
+<h2>10.1 colcon 构建</h2>
+<p>colcon 是 ROS2 的构建「调度器」：它分析包之间的依赖关系，按拓扑顺序调用每个包自己的构建系统（CMake 或 setuptools）。</p>
+<table>
+  <thead><tr><th>命令 / 选项</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>colcon build</code></td><td>构建 <code>src</code> 下所有包</td></tr>
+    <tr><td><code>--packages-select a b</code></td><td>只构建指定的包</td></tr>
+    <tr><td><code>--packages-up-to a</code></td><td>构建 a 及其所有依赖</td></tr>
+    <tr><td><code>--packages-skip a</code></td><td>跳过某些包</td></tr>
+    <tr><td><code>--symlink-install</code></td><td>用符号链接安装 Python 文件、launch、配置，修改后免重新构建</td></tr>
+    <tr><td><code>--cmake-args -DCMAKE_BUILD_TYPE=Release</code></td><td>Release 优化编译（性能差距可达数倍）</td></tr>
+    <tr><td><code>--cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON</code></td><td>生成 compile_commands.json，供 clangd 补全</td></tr>
+    <tr><td><code>--parallel-workers 2</code></td><td>限制并行数（内存不足、WSL 卡死时使用）</td></tr>
+    <tr><td><code>--event-handlers console_direct+</code></td><td>实时显示完整编译输出</td></tr>
+    <tr><td><code>--continue-on-error</code></td><td>某个包失败后继续构建其他包</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+colcon list                    # 列出工作空间中的包
+colcon graph                   # 显示依赖关系
+colcon build --packages-up-to my_bot_gazebo --symlink-install
+
+# 完全清理（遇到奇怪的构建缓存问题时）
+rm -rf build install log
+</script>
+<div class="callout danger">
+  <strong>永远在工作空间根目录执行 colcon build</strong>
+  <p>在 <code>src</code> 或包目录中执行会在错误的位置生成 build/install，之后 source 的是旧版本，出现「改了代码不生效」的灵异现象。</p>
+</div>
+<div class="callout tip">
+  <strong>快速进入包目录</strong>
+  <p>把 <code>source /usr/share/colcon_cd/function/colcon_cd.sh</code> 和 <code>export _colcon_cd_root=~/ros2_ws</code> 加入 <code>~/.bashrc</code>，之后 <code>colcon_cd my_bot_description</code> 即可跳转。</p>
+</div>
+
+<h2>10.2 package.xml 依赖</h2>
+<script type="text/plain" class="code" data-lang="xml" data-file="package.xml 完整示例">
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>my_bot_driver</name>
+  <version>0.1.0</version>
+  <description>Serial driver for my_bot base</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>              <!-- 构建 + 运行都需要 -->
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <build_depend>libserial-dev</build_depend>       <!-- 只在编译时需要 -->
+  <exec_depend>libserial1</exec_depend>            <!-- 只在运行时需要 -->
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+</script>
+<table>
+  <thead><tr><th>标签</th><th>何时需要</th></tr></thead>
+  <tbody>
+    <tr><td><code>depend</code></td><td>编译和运行都要（大多数 ROS 包依赖都用它）</td></tr>
+    <tr><td><code>build_depend</code></td><td>只在编译时用，如头文件库</td></tr>
+    <tr><td><code>exec_depend</code></td><td>只在运行时用，如 launch 中启动的其他包、Python 库</td></tr>
+    <tr><td><code>test_depend</code></td><td>只在测试时用</td></tr>
+    <tr><td><code>buildtool_depend</code></td><td>构建工具本身：<code>ament_cmake</code> 或 <code>ament_python</code></td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>依赖声明不全是团队协作中最常见的问题</strong>
+  <p>你的机器上碰巧装了某个库，构建成功；同事的机器上没有，构建失败。所有依赖都必须写进 package.xml，并通过 rosdep 安装来验证。</p>
+</div>
+
+<h2>10.3 rosdep：一键安装依赖</h2>
+<p>rosdep 读取 package.xml 中的依赖名（称为 rosdep key），把它们翻译成当前系统的 apt / pip 包名并安装。</p>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws
+rosdep install --from-paths src --ignore-src -r -y
+#   --from-paths src   扫描 src 下所有 package.xml
+#   --ignore-src       工作空间中已有源码的包不安装
+#   -r                 某个失败时继续
+#   -y                 不询问
+
+rosdep check --from-paths src --ignore-src     # 只检查不安装
+rosdep resolve python3-numpy                   # 查看某个 key 对应的系统包
+</script>
+<p>可用的 key 列表见 <a href="https://github.com/ros/rosdistro/tree/master/rosdep" target="_blank" rel="noopener">rosdistro/rosdep</a>（<code>base.yaml</code> 为系统库，<code>python.yaml</code> 为 Python 库）。</p>
+
+<h2>10.4 多仓库管理：vcstool</h2>
+<p>项目依赖多个 Git 仓库时，用 <code>.repos</code> 文件描述，团队成员一条命令即可拉取全部源码。</p>
+<script type="text/plain" class="code" data-lang="yaml" data-file="~/ros2_ws/my_bot.repos">
+repositories:
+  my_bot:
+    type: git
+    url: https://github.com/yourname/my_bot.git
+    version: main
+  slam_toolbox:
+    type: git
+    url: https://github.com/SteveMacenski/slam_toolbox.git
+    version: jazzy
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws
+vcs import src < my_bot.repos       # 克隆所有仓库
+vcs pull src                        # 全部更新
+vcs status src                      # 查看各仓库状态
+vcs export src > snapshot.repos --exact   # 导出当前精确版本（便于复现）
+</script>
+
+<h2>10.5 推荐的项目结构</h2>
+<pre class="diagram">
+my_bot/                         一个 Git 仓库，多个包
+├── my_bot_interfaces/          自定义 msg / srv / action（ament_cmake）
+├── my_bot_description/         URDF、mesh、RViz 配置
+├── my_bot_gazebo/              仿真世界与仿真 launch
+├── my_bot_driver/              硬件驱动（C++）
+├── my_bot_navigation/          Nav2 参数、地图
+├── my_bot_bringup/             顶层 launch 与参数，不含代码
+└── my_bot_apps/                上层业务逻辑（Python）
+</pre>
+<ul>
+  <li><strong>接口包独立</strong>：被所有包依赖，避免循环依赖</li>
+  <li><strong>算法与 ROS 解耦</strong>：核心算法写成不依赖 rclpy/rclcpp 的普通类，节点只负责收发消息并调用它。这样算法可以直接单元测试，也便于移植</li>
+  <li><strong>bringup 只有配置</strong>：参数、launch 集中管理，换机器人只需换 bringup</li>
+</ul>
+
+<h2>10.6 Python 单元测试</h2>
+<p>把业务逻辑写成纯函数：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/motion_utils.py">
+import math
+
+
+def clamp(value: float, limit: float) -> float:
+    """把 value 限制在 [-limit, limit]。"""
+    if limit < 0:
+        raise ValueError('limit must be non-negative')
+    return max(-limit, min(limit, value))
+
+
+def normalize_angle(angle: float) -> float:
+    """把角度归一化到 (-pi, pi]。"""
+    a = math.fmod(angle + math.pi, 2 * math.pi)
+    if a <= 0:
+        a += 2 * math.pi
+    return a - math.pi
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/test/test_motion_utils.py">
+import math
+
+import pytest
+from my_first_nodes.motion_utils import clamp, normalize_angle
+
+
+@pytest.mark.parametrize('value, limit, expected', [
+    (0.5, 1.0, 0.5),
+    (2.0, 1.0, 1.0),
+    (-3.0, 1.0, -1.0),
+])
+def test_clamp(value, limit, expected):
+    assert clamp(value, limit) == expected
+
+
+def test_clamp_negative_limit():
+    with pytest.raises(ValueError):
+        clamp(1.0, -1.0)
+
+
+def test_normalize_angle():
+    assert normalize_angle(3 * math.pi) == pytest.approx(math.pi)
+    assert normalize_angle(-math.pi / 2) == pytest.approx(-math.pi / 2)
+    assert normalize_angle(2 * math.pi) == pytest.approx(0.0)
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+colcon test --packages-select my_first_nodes
+colcon test-result --verbose            # 查看失败详情
+# 或在包目录中直接用 pytest 快速迭代
+cd ~/ros2_ws/src/my_first_nodes && python3 -m pytest test/test_motion_utils.py -v
+</script>
+<p><code>ros2 pkg create</code> 生成的 Python 包自带 <code>test_flake8.py</code>、<code>test_pep257.py</code>、<code>test_copyright.py</code>，会检查代码风格；若暂时不需要版权检查，可删除 <code>test_copyright.py</code>。</p>
+
+<h2>10.7 C++ 单元测试（gtest）</h2>
+<script type="text/plain" class="code" data-lang="cpp" data-file="cpp_pubsub/include/cpp_pubsub/motion_utils.hpp">
+#pragma once
+#include <algorithm>
+#include <stdexcept>
+
+namespace cpp_pubsub
+{
+inline double clamp(double value, double limit)
+{
+  if (limit < 0.0) {throw std::invalid_argument("limit must be non-negative");}
+  return std::max(-limit, std::min(limit, value));
+}
+}  // namespace cpp_pubsub
+</script>
+<script type="text/plain" class="code" data-lang="cpp" data-file="cpp_pubsub/test/test_motion_utils.cpp">
+#include <gtest/gtest.h>
+#include "cpp_pubsub/motion_utils.hpp"
+
+TEST(MotionUtils, ClampInsideRange) {
+  EXPECT_DOUBLE_EQ(cpp_pubsub::clamp(0.5, 1.0), 0.5);
+}
+
+TEST(MotionUtils, ClampOutsideRange) {
+  EXPECT_DOUBLE_EQ(cpp_pubsub::clamp(2.0, 1.0), 1.0);
+  EXPECT_DOUBLE_EQ(cpp_pubsub::clamp(-2.0, 1.0), -1.0);
+}
+
+TEST(MotionUtils, NegativeLimitThrows) {
+  EXPECT_THROW(cpp_pubsub::clamp(1.0, -1.0), std::invalid_argument);
+}
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="cpp_pubsub/CMakeLists.txt（ament_package() 之前）">
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  set(ament_cmake_copyright_FOUND TRUE)      # 跳过版权检查
+  ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_motion_utils test/test_motion_utils.cpp)
+  target_include_directories(test_motion_utils PRIVATE include)
+endif()
+</script>
+
+<h2>10.8 代码风格</h2>
+<table>
+  <thead><tr><th>语言</th><th>规范</th><th>工具</th></tr></thead>
+  <tbody>
+    <tr><td>C++</td><td>ROS2 风格（基于 Google，2 空格缩进，100 列）</td><td><code>ament_uncrustify --reformat</code>、<code>ament_cpplint</code></td></tr>
+    <tr><td>Python</td><td>PEP 8，99 列</td><td><code>ament_flake8</code>、<code>ament_pep257</code></td></tr>
+    <tr><td>命名</td><td>包名、节点名、话题名用 snake_case；C++ 类名 CamelCase</td><td>—</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ament_uncrustify --reformat src/cpp_pubsub/src/    # 自动格式化 C++
+ament_flake8 src/my_first_nodes/                   # 检查 Python
+</script>
+
+<h2>10.9 持续集成（GitHub Actions）</h2>
+<script type="text/plain" class="code" data-lang="yaml" data-file=".github/workflows/ci.yml">
+name: ROS2 CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          target-ros2-distro: jazzy
+          package-name: my_interfaces my_first_nodes cpp_pubsub
+</script>
+<p>action-ros-ci 会自动检出代码、执行 rosdep 安装、colcon build 和 colcon test。版本号请以官方仓库最新发布为准。</p>
+
+<h2>10.10 .gitignore</h2>
+<script type="text/plain" class="code" data-lang="text" data-file="~/ros2_ws/src/my_bot/.gitignore">
+build/
+install/
+log/
+__pycache__/
+*.pyc
+.vscode/
+*.bag
+rosbag2_*/
+</script>
+<div class="callout tip">
+  <strong>仓库放哪一层</strong>
+  <p>通常把 <code>src/my_bot</code> 作为一个 Git 仓库，而不是整个 <code>ros2_ws</code>。工作空间是本地构建环境，不应提交。</p>
+</div>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. Python 包使用了 numpy，但没有写进 package.xml，会有什么问题？</summary>
+<div>在你机器上能运行，但 <code>rosdep install</code> 不会为其他人安装 numpy，部署到新机器或 CI 时运行报 ImportError。应添加 <code>&lt;exec_depend&gt;python3-numpy&lt;/exec_depend&gt;</code>。</div></details>
+<details class="quiz"><summary>2. <code>--packages-select</code> 和 <code>--packages-up-to</code> 的区别？</summary>
+<div>前者只构建列出的包，假设其依赖已构建好；后者会同时构建列出的包及其在工作空间内的全部依赖。首次构建或依赖包有修改时用后者。</div></details>
+<details class="quiz"><summary>3. 为什么建议核心算法不依赖 rclpy？</summary>
+<div>不依赖 ROS 的纯函数 / 类可以直接用 pytest 测试，无需启动节点、构造消息；也更容易复用在非 ROS 环境（离线分析脚本、其他框架）中。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>熟悉 <code>--packages-select</code>、<code>--symlink-install</code>、Release 构建</li>
+  <li>能写出完整的 package.xml 并区分各类依赖标签</li>
+  <li>在一个干净的工作空间中用 rosdep 成功安装依赖</li>
+  <li>Python 与 C++ 单元测试都能通过 <code>colcon test</code> 运行</li>
+  <li>项目已放入 Git，并有正确的 .gitignore</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

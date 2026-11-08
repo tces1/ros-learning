@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 15 章 感知 Pipeline · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch15" data-root="../">
+<main class="content">
+
+<h1>第 15 章　感知 Pipeline</h1>
+<p class="lead">让机器人「看懂」世界：处理激光数据实现安全停车，用 OpenCV 处理相机图像，理解相机模型与标定，处理 3D 点云，同步多个传感器，并把深度学习检测器接入 ROS。</p>
+<div class="meta-bar"><span class="tag">动手约 4 小时</span><span class="tag">Python + OpenCV + NumPy</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解 LaserScan、Image、CameraInfo、PointCloud2 的数据结构</li>
+  <li>编写激光避障安全节点</li>
+  <li>用 cv_bridge 在 ROS 图像与 OpenCV 之间转换，实现颜色目标检测</li>
+  <li>理解针孔相机模型，完成相机标定，从深度图恢复 3D 坐标</li>
+  <li>读取、过滤、发布点云；用 message_filters 同步多传感器</li>
+  <li>了解深度学习模型接入 ROS 的标准方式</li>
+</ul>
+
+<h2>15.1 激光数据：LaserScan</h2>
+<script type="text/plain" class="code" data-lang="ros" data-file="sensor_msgs/msg/LaserScan">
+std_msgs/Header header     # frame_id 为激光坐标系
+float32 angle_min          # 第一个测距点的角度（rad）
+float32 angle_max          # 最后一个测距点的角度
+float32 angle_increment    # 相邻测距点的角度差
+float32 time_increment
+float32 scan_time
+float32 range_min          # 有效测距范围
+float32 range_max
+float32[] ranges           # 距离（m），无效值可能为 inf 或 nan
+float32[] intensities      # 反射强度（可选）
+</script>
+<p>第 i 个点的角度为 <code>angle_min + i * angle_increment</code>，在激光坐标系中的位置为 <code>(r·cos θ, r·sin θ)</code>。</p>
+<h3>实战：前方障碍安全停车</h3>
+<p>这个节点位于遥控 / 导航与底盘之间：转发速度指令，但若前方扇形区域内有过近的障碍物，就禁止前进。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/safety_stop.py">
+import math
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+
+
+class SafetyStop(Node):
+    def __init__(self):
+        super().__init__('safety_stop')
+        self.declare_parameter('stop_distance', 0.4)
+        self.declare_parameter('half_angle_deg', 30.0)
+        self.min_front = math.inf
+
+        self.create_subscription(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
+        self.create_subscription(Twist, 'cmd_vel_in', self.on_cmd, 10)
+        self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
+
+    def on_scan(self, scan: LaserScan):
+        ranges = np.asarray(scan.ranges)
+        angles = scan.angle_min + np.arange(len(ranges)) * scan.angle_increment
+        half = math.radians(self.get_parameter('half_angle_deg').value)
+        valid = np.isfinite(ranges) & (ranges > scan.range_min) & (ranges < scan.range_max)
+        front = valid & (np.abs(angles) < half)
+        self.min_front = float(ranges[front].min()) if front.any() else math.inf
+
+    def on_cmd(self, cmd: Twist):
+        stop_d = self.get_parameter('stop_distance').value
+        if cmd.linear.x > 0.0 and self.min_front < stop_d:
+            cmd.linear.x = 0.0
+            self.get_logger().warn(f'前方 {self.min_front:.2f} m 有障碍，禁止前进',
+                                   throttle_duration_sec=1.0)
+        self.pub.publish(cmd)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(SafetyStop())
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+# 仿真运行中：teleop 发布到 cmd_vel_in，由 safety_stop 过滤后转发到 /cmd_vel
+ros2 run my_first_nodes safety_stop
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=cmd_vel_in
+</script>
+<div class="callout note">
+  <strong>为什么用 NumPy</strong>
+  <p>360 个点用 Python 循环也能处理，但对 3D 激光（数万点）就太慢了。用 NumPy 向量化运算是 Python 处理传感器数据的基本功。Nav2 自带的 collision_monitor 是这个思路的工业级实现。</p>
+</div>
+
+<h2>15.2 图像：Image 与 cv_bridge</h2>
+<table>
+  <thead><tr><th>字段</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>height</code>、<code>width</code></td><td>像素尺寸</td></tr>
+    <tr><td><code>encoding</code></td><td><code>rgb8</code>、<code>bgr8</code>、<code>mono8</code>、<code>16UC1</code>（深度，毫米）、<code>32FC1</code>（深度，米）等</td></tr>
+    <tr><td><code>step</code></td><td>每行字节数</td></tr>
+    <tr><td><code>data</code></td><td>原始字节</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-cv-bridge ros-jazzy-v4l2-camera ros-jazzy-image-transport-plugins \
+  ros-jazzy-rqt-image-view python3-opencv
+
+# 有 USB 摄像头时（原生 Linux）：
+ros2 run v4l2_camera v4l2_camera_node --ros-args -p image_size:="[640,480]"
+ros2 run rqt_image_view rqt_image_view
+</script>
+<div class="callout tip">
+  <strong>没有摄像头 / 在 WSL 中</strong>
+  <p>WSL2 默认无法直接访问 USB 摄像头。可以在第 9 章仿真中按 9.8 节添加相机传感器，或用 bag 回放公开数据集，代码完全相同。</p>
+</div>
+<h3>实战：红色物体检测</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/color_detector.py">
+import cv2
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PointStamped
+from sensor_msgs.msg import Image
+
+
+class ColorDetector(Node):
+    def __init__(self):
+        super().__init__('color_detector')
+        self.bridge = CvBridge()
+        self.create_subscription(Image, 'image_raw', self.on_image, qos_profile_sensor_data)
+        self.debug_pub = self.create_publisher(Image, 'detection/image', 10)
+        self.target_pub = self.create_publisher(PointStamped, 'detection/target_pixel', 10)
+
+    def on_image(self, msg: Image):
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # 红色在 HSV 色环两端，需要两段阈值
+        mask = cv2.inRange(hsv, (0, 120, 70), (10, 255, 255)) | \
+               cv2.inRange(hsv, (170, 120, 70), (180, 255, 255))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            biggest = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(biggest) > 300:
+                x, y, w, h = cv2.boundingRect(biggest)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                target = PointStamped()
+                target.header = msg.header           # 保留原始时间戳与 frame_id
+                target.point.x = float(x + w / 2)    # 像素坐标 u
+                target.point.y = float(y + h / 2)    # 像素坐标 v
+                self.target_pub.publish(target)
+
+        out = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+        out.header = msg.header
+        self.debug_pub.publish(out)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(ColorDetector())
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run my_first_nodes color_detector --ros-args -r image_raw:=/camera/image_raw
+ros2 run rqt_image_view rqt_image_view /detection/image
+</script>
+<h3>图像传输与压缩</h3>
+<p>原始图像带宽很大（640×480 RGB × 30 fps ≈ 27 MB/s）。<code>image_transport</code> 会为图像话题自动提供 <code>/compressed</code>（JPEG/PNG）等压缩版本，跨网络传输或录包时应使用压缩话题。C++ 节点中使用 <code>image_transport::create_subscription</code> 可以透明地选择传输方式。</p>
+
+<h2>15.3 相机模型与标定</h2>
+<h3>针孔模型</h3>
+<pre class="diagram">
+  3D 点 (X, Y, Z)（相机光学坐标系：z 向前、x 向右、y 向下）
+        │  投影
+        ▼
+  u = fx · X / Z + cx          fx, fy：焦距（像素）
+  v = fy · Y / Z + cy          cx, cy：主点（通常接近图像中心）
+
+  反过来，已知像素 (u, v) 和深度 Z：
+  X = (u − cx) · Z / fx
+  Y = (v − cy) · Z / fy
+</pre>
+<p>这些内参保存在 <code>sensor_msgs/msg/CameraInfo</code> 的 <code>k</code> 矩阵中：<code>k = [fx, 0, cx, 0, fy, cy, 0, 0, 1]</code>。<code>d</code> 是畸变系数。</p>
+<h3>标定</h3>
+<p>打印一张棋盘格标定板（例如 9×7 方格，即 8×6 个内角点，每格 25 mm），运行：</p>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-camera-calibration
+ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025 \
+  --ros-args -r image:=/image_raw -r camera:=/camera
+</script>
+<p>在相机前移动标定板（左右、上下、远近、倾斜），直到 X、Y、Size、Skew 进度条都变绿，点 CALIBRATE，再点 SAVE。结果保存在 <code>/tmp/calibrationdata.tar.gz</code>，其中的 <code>ost.yaml</code> 可通过相机驱动的 <code>camera_info_url</code> 参数加载。</p>
+<h3>从深度图得到 3D 坐标</h3>
+<script type="text/plain" class="code" data-lang="python">
+import numpy as np
+
+def pixel_to_point(u, v, depth_img, camera_info):
+    """depth_img 为 32FC1（米）或 16UC1（毫米）的 numpy 数组。"""
+    z = float(depth_img[int(v), int(u)])
+    if depth_img.dtype == np.uint16:
+        z /= 1000.0
+    if not np.isfinite(z) or z <= 0:
+        return None
+    fx, fy = camera_info.k[0], camera_info.k[4]
+    cx, cy = camera_info.k[2], camera_info.k[5]
+    return ((u - cx) * z / fx, (v - cy) * z / fy, z)   # 位于 camera_optical_frame
+</script>
+<p>得到的点在 <code>camera_optical_frame</code> 中，用第 7 章的 <code>buffer.transform()</code> 即可变换到 <code>base_link</code> 或 <code>map</code>，例如作为机械臂抓取目标或导航目标。</p>
+
+<h2>15.4 点云：PointCloud2</h2>
+<p>PointCloud2 是紧凑的二进制格式，<code>fields</code> 描述每个点包含哪些字段（x、y、z、intensity、rgb …）及其偏移。Python 中用 <code>sensor_msgs_py</code> 读写：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/cloud_filter.py">
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
+
+
+class CloudFilter(Node):
+    """保留 z 在 [0.05, 1.5] m 之间、距离 5 m 内的点，并做简单体素降采样。"""
+
+    def __init__(self):
+        super().__init__('cloud_filter')
+        self.declare_parameter('voxel', 0.05)
+        self.create_subscription(PointCloud2, 'points', self.on_cloud, qos_profile_sensor_data)
+        self.pub = self.create_publisher(PointCloud2, 'points_filtered', 10)
+
+    def on_cloud(self, msg: PointCloud2):
+        pts = point_cloud2.read_points_numpy(msg, field_names=('x', 'y', 'z'), skip_nans=True)
+        if pts.size == 0:
+            return
+        dist = np.linalg.norm(pts[:, :2], axis=1)
+        keep = (pts[:, 2] > 0.05) & (pts[:, 2] < 1.5) & (dist < 5.0)
+        pts = pts[keep]
+
+        voxel = self.get_parameter('voxel').value
+        keys = np.floor(pts / voxel).astype(np.int32)
+        _, idx = np.unique(keys, axis=0, return_index=True)   # 每个体素保留一个点
+        pts = pts[idx]
+
+        out = point_cloud2.create_cloud_xyz32(msg.header, pts.tolist())
+        self.pub.publish(out)
+        self.get_logger().info(f'{len(keep)} -> {len(pts)} 点', throttle_duration_sec=2.0)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(CloudFilter())
+</script>
+<p>注意：上面示例假设点云 z 轴向上（如 3D 激光雷达）。深度相机输出的点云在光学坐标系中（z 向前），需要先变换到 <code>base_link</code> 再按高度过滤。</p>
+<h3>C++ 与 PCL</h3>
+<p>大规模点云处理推荐 C++ + PCL（Point Cloud Library），通过 <code>pcl_conversions</code> 与 ROS 消息互转：</p>
+<script type="text/plain" class="code" data-lang="cpp">
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/point_types.h>
+#include <pcl_conversions/pcl_conversions.h>
+
+void on_cloud(const sensor_msgs::msg::PointCloud2 & msg)
+{
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::fromROSMsg(msg, *cloud);
+
+  pcl::VoxelGrid<pcl::PointXYZ> voxel;
+  voxel.setInputCloud(cloud);
+  voxel.setLeafSize(0.05f, 0.05f, 0.05f);
+  pcl::PointCloud<pcl::PointXYZ> filtered;
+  voxel.filter(filtered);
+
+  sensor_msgs::msg::PointCloud2 out;
+  pcl::toROSMsg(filtered, out);
+  out.header = msg.header;
+  pub_->publish(out);
+}
+</script>
+<h3>常用转换包</h3>
+<table>
+  <thead><tr><th>包</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>depthimage_to_laserscan</code></td><td>深度图 → 虚拟 2D 激光（低成本导航）</td></tr>
+    <tr><td><code>pointcloud_to_laserscan</code></td><td>3D 点云切片 → 2D 激光</td></tr>
+    <tr><td><code>depth_image_proc</code></td><td>深度图 → 点云、深度与彩色配准</td></tr>
+    <tr><td><code>image_proc</code></td><td>去畸变、彩色化</td></tr>
+  </tbody>
+</table>
+
+<h2>15.5 多传感器时间同步</h2>
+<p>融合 RGB 图像和深度图、或左右目图像时，要确保处理的是「同一时刻」的数据：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/rgbd_sync.py">
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from sensor_msgs.msg import CameraInfo, Image
+
+
+class RgbdSync(Node):
+    def __init__(self):
+        super().__init__('rgbd_sync')
+        color = Subscriber(self, Image, 'camera/color/image_raw', qos_profile=qos_profile_sensor_data)
+        depth = Subscriber(self, Image, 'camera/depth/image_raw', qos_profile=qos_profile_sensor_data)
+        info = Subscriber(self, CameraInfo, 'camera/color/camera_info')
+        # queue_size=10，时间戳相差 0.05 s 以内视为同一帧
+        self.sync = ApproximateTimeSynchronizer([color, depth, info], 10, 0.05)
+        self.sync.registerCallback(self.on_synced)
+
+    def on_synced(self, color: Image, depth: Image, info: CameraInfo):
+        dt = abs((color.header.stamp.nanosec - depth.header.stamp.nanosec) / 1e6)
+        self.get_logger().info(f'同步成功，时间差约 {dt:.1f} ms', throttle_duration_sec=2.0)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(RgbdSync())
+</script>
+<p><code>TimeSynchronizer</code> 要求时间戳完全相同（同一硬件触发的传感器），<code>ApproximateTimeSynchronizer</code> 允许误差（大多数情况）。</p>
+
+<h2>15.6 接入深度学习模型</h2>
+<p>推荐模式：一个节点订阅图像，运行模型，发布标准的 <code>vision_msgs/msg/Detection2DArray</code>，下游节点（跟踪、抓取、导航）只依赖这个消息类型，与具体模型解耦。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="yolo_node.py（骨架，需 pip install ultralytics）">
+from cv_bridge import CvBridge
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
+from ultralytics import YOLO
+
+
+class YoloNode(Node):
+    def __init__(self):
+        super().__init__('yolo')
+        self.model = YOLO('yolov8n.pt')
+        self.bridge = CvBridge()
+        self.create_subscription(Image, 'image_raw', self.on_image, qos_profile_sensor_data)
+        self.pub = self.create_publisher(Detection2DArray, 'detections', 10)
+
+    def on_image(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        result = self.model(frame, verbose=False)[0]
+        out = Detection2DArray(header=msg.header)
+        for box in result.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            det = Detection2D(header=msg.header)
+            det.bbox.center.position.x = (x1 + x2) / 2
+            det.bbox.center.position.y = (y1 + y2) / 2
+            det.bbox.size_x, det.bbox.size_y = x2 - x1, y2 - y1
+            hyp = ObjectHypothesisWithPose()
+            hyp.hypothesis.class_id = result.names[int(box.cls)]
+            hyp.hypothesis.score = float(box.conf)
+            det.results.append(hyp)
+            out.detections.append(det)
+        self.pub.publish(out)
+</script>
+<div class="callout warn">
+  <strong>推理耗时会阻塞回调</strong>
+  <p>模型推理可能需要几十毫秒，订阅使用 depth=1 的传感器 QoS 处理最新帧即可，避免排队处理过期图像。需要更高性能时考虑 C++ + TensorRT / OpenVINO，或 NVIDIA Isaac ROS。</p>
+</div>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. LaserScan 中 ranges 有 <code>inf</code> 值代表什么？如何处理？</summary>
+<div>通常表示该方向在量程内没有回波（前方空旷或超出最大距离），有的驱动也用 <code>inf</code> / <code>nan</code> 表示无效测量。计算最近障碍物时应过滤掉非有限值和超出 [range_min, range_max] 的值。</div></details>
+<details class="quiz"><summary>2. fx = 600、cx = 320，像素 u = 420，深度 2 m，该点 X 坐标是多少？在哪个坐标系？</summary>
+<div>X = (420 − 320) × 2 / 600 ≈ 0.333 m，位于 camera_optical_frame（x 向右），即光轴右侧约 33 cm。</div></details>
+<details class="quiz"><summary>3. 为什么检测结果的 header 要沿用原始图像的 header？</summary>
+<div>时间戳表示图像采集时刻，下游需要用它查询当时的 TF（机器人可能已移动）；frame_id 说明坐标属于哪个相机。用处理完成时刻作为时间戳会导致坐标变换误差。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>safety_stop 在仿真中能阻止小车撞墙</li>
+  <li>color_detector 能框出红色物体</li>
+  <li>能根据内参把像素和深度换算为 3D 坐标</li>
+  <li>cloud_filter 能读取、过滤、发布点云</li>
+  <li>会用 ApproximateTimeSynchronizer 同步多个话题</li>
+  <li>理解检测节点发布 vision_msgs 的解耦设计</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

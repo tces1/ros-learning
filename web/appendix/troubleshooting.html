@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>附录 A 常见问题排查 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="faq" data-root="../">
+<main class="content">
+
+<h1>附录 A　常见问题排查</h1>
+<p class="lead">按「现象 → 原因 → 解决」整理学习过程中最常遇到的问题。遇到报错时先在本页搜索（Ctrl+F）关键词。</p>
+
+<h2>A.1 环境与安装</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td><code>ros2: command not found</code></td><td>未 source ROS 环境</td><td><code>source /opt/ros/jazzy/setup.bash</code>，并写入 <code>~/.bashrc</code></td></tr>
+    <tr><td>apt 安装时报依赖冲突、“held broken packages”</td><td>系统包未升级</td><td>先 <code>sudo apt update &amp;&amp; sudo apt upgrade</code> 再安装</td></tr>
+    <tr><td><code>rosdep update</code> 超时</td><td>访问 GitHub 受限</td><td>使用代理或 <code>rosdepc</code></td></tr>
+    <tr><td>RViz / Gazebo 窗口打不开（WSL）</td><td>图形驱动问题</td><td><code>wsl --update</code>；尝试 <code>export LIBGL_ALWAYS_SOFTWARE=1</code></td></tr>
+    <tr><td>编译时 WSL 卡死或被杀</td><td>内存不足</td><td><code>colcon build --parallel-workers 1</code>；在 <code>%UserProfile%\.wslconfig</code> 中增加 <code>memory=8GB</code> 与 swap</td></tr>
+    <tr><td>混用 Humble 与 Jazzy 的包</td><td>同时 source 了两个发行版</td><td>检查 <code>~/.bashrc</code>，一个终端只 source 一个发行版</td></tr>
+  </tbody>
+</table>
+
+<h2>A.2 构建与运行</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td><code>Package 'xxx' not found</code></td><td>未 source 工作空间 / 构建失败 / 在错误目录构建</td><td>在 <code>~/ros2_ws</code> 构建，<code>source install/setup.bash</code></td></tr>
+    <tr><td><code>No executable found</code></td><td>入口未注册或未安装</td><td>Python：<code>setup.py</code> 的 <code>console_scripts</code>；C++：<code>install(TARGETS ... DESTINATION lib/${PROJECT_NAME})</code></td></tr>
+    <tr><td>launch / yaml 文件找不到</td><td>未安装到 share 目录</td><td>Python 包在 <code>data_files</code> 加入；C++ 包 <code>install(DIRECTORY ...)</code></td></tr>
+    <tr><td>改了代码不生效</td><td>没重新构建，或 source 的是旧 install</td><td>重新 build 并 source；Python 用 <code>--symlink-install</code></td></tr>
+    <tr><td><code>ModuleNotFoundError: No module named 'my_interfaces'</code></td><td>接口包未构建或未在 package.xml 声明依赖</td><td>先构建接口包，添加 <code>&lt;depend&gt;my_interfaces&lt;/depend&gt;</code></td></tr>
+    <tr><td>CMake：<code>Could not find a package configuration file provided by "xxx"</code></td><td>依赖未安装</td><td><code>rosdep install --from-paths src --ignore-src -y</code> 或 <code>sudo apt install ros-jazzy-xxx</code>（下划线换成短横线）</td></tr>
+    <tr><td>自定义消息报错 “field name must be lowercase”</td><td>字段命名不规范</td><td>字段用 snake_case，常量全大写</td></tr>
+    <tr><td><code>setup.py install is deprecated</code> 警告</td><td>setuptools 版本提示</td><td>可忽略，不影响使用</td></tr>
+  </tbody>
+</table>
+
+<h2>A.3 通信</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td>话题存在但订阅回调不触发</td><td>QoS 不兼容</td><td><code>ros2 topic info -v</code> 对比；传感器话题用 <code>qos_profile_sensor_data</code></td></tr>
+    <tr><td>两台电脑互相看不到节点</td><td>Domain ID 不同、防火墙、不同网段、组播被禁</td><td>统一 <code>ROS_DOMAIN_ID</code>；开放 UDP 7400–7600；检查 <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>；必要时用 <code>ROS_STATIC_PEERS</code></td></tr>
+    <tr><td>看到了别人的话题</td><td>同网段同 Domain</td><td>修改 <code>ROS_DOMAIN_ID</code></td></tr>
+    <tr><td><code>ros2 topic list</code> 结果不全或滞后</td><td>ROS 2 daemon 缓存</td><td><code>ros2 daemon stop &amp;&amp; ros2 daemon start</code></td></tr>
+    <tr><td>服务调用卡住不返回</td><td>在回调中同步等待服务响应导致死锁</td><td>用 <code>call_async</code> + 完成回调，或独立回调组 + 多线程执行器（第 5 章）</td></tr>
+    <tr><td><code>Parameter not declared</code></td><td>使用前未声明</td><td>先 <code>declare_parameter</code></td></tr>
+    <tr><td>Twist 发出去但机器人不动</td><td>话题名或类型（Twist / TwistStamped）不匹配</td><td><code>ros2 topic info -v /cmd_vel</code> 看订阅者类型</td></tr>
+  </tbody>
+</table>
+
+<h2>A.4 TF 与时间</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td><code>"xxx" passed to lookupTransform argument target_frame does not exist</code></td><td>坐标系未发布或拼写错误</td><td><code>view_frames</code> 检查；frame_id 不要以 <code>/</code> 开头</td></tr>
+    <tr><td><code>Lookup would require extrapolation into the future</code></td><td>TF 延迟、时间源不一致</td><td>所有节点统一 <code>use_sim_time</code>；查询加 timeout；用 <code>Time()</code> 获取最新变换</td></tr>
+    <tr><td><code>extrapolation into the past</code></td><td>数据太旧或时间源不一致</td><td>同上；检查 bag 回放是否用了 <code>--clock</code></td></tr>
+    <tr><td>TF 树断成两截</td><td>缺少某个发布者（如 robot_state_publisher、里程计）</td><td><code>view_frames</code> 找到断点</td></tr>
+    <tr><td>机器人在 RViz 中抖动 / 跳变</td><td>两个节点发布同一变换</td><td><code>view_frames</code> 查看每条边的发布者</td></tr>
+    <tr><td>RViz 中数据不显示、报 “Message filter dropping message”</td><td>Fixed Frame 与数据坐标系之间没有变换，或时间戳问题</td><td>检查 Fixed Frame 和 TF；检查 use_sim_time</td></tr>
+  </tbody>
+</table>
+
+<h2>A.5 仿真</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td>模型没出现</td><td>robot_description 为空、xacro 错误、spawn 失败</td><td>看 <code>create</code> 节点输出；手动运行 <code>xacro</code> 检查</td></tr>
+    <tr><td>模型抖动、弹飞</td><td>惯性不合理、碰撞体重叠</td><td>按公式计算惯性；检查碰撞体与地面不重叠</td></tr>
+    <tr><td>小车不动</td><td>桥接方向错误；仿真暂停；插件关节名错误</td><td><code>gz topic -l</code>；启动时加 <code>-r</code>；核对关节名</td></tr>
+    <tr><td>激光无数据</td><td>世界缺少 Sensors 系统插件</td><td>在 world 中加入 <code>gz-sim-sensors-system</code></td></tr>
+    <tr><td>仿真非常慢（实时因子很低）</td><td>软件渲染、物理步长太小、模型复杂</td><td>使用 GPU；简化碰撞体；无界面运行 <code>-s</code></td></tr>
+  </tbody>
+</table>
+
+<h2>A.6 导航</h2>
+<table>
+  <thead><tr><th>现象</th><th>原因</th><th>解决</th></tr></thead>
+  <tbody>
+    <tr><td>Nav2 一直等待、不激活</td><td>AMCL 未收到初始位姿；TF 缺失</td><td>RViz 设置 2D Pose Estimate；参数 <code>set_initial_pose: true</code></td></tr>
+    <tr><td>“Failed to create plan”</td><td>目标 / 起点在障碍或膨胀区内</td><td>检查初始位姿；减小 inflation_radius；目标放在空旷处</td></tr>
+    <tr><td>“Robot is out of bounds of the costmap”</td><td>定位错误或代价地图尺寸太小</td><td>重新设置初始位姿；检查全局代价地图</td></tr>
+    <tr><td>机器人在原地打转</td><td>目标容差太小、控制器参数不当</td><td>放宽 goal checker 容差</td></tr>
+    <tr><td>代价地图上没有障碍物</td><td>激光 QoS、话题名、frame 或 obstacle_max_range 设置错误</td><td>检查 observation_sources 配置</td></tr>
+    <tr><td>建图有重影</td><td>里程计不准、转弯太快</td><td>放慢速度；检查轮距、轮径参数</td></tr>
+  </tbody>
+</table>
+
+<h2>A.7 求助的正确方式</h2>
+<p>在论坛或 Robotics Stack Exchange 提问时，请提供：</p>
+<ol>
+  <li>ROS 发行版、Ubuntu 版本、是否在 WSL / 虚拟机中</li>
+  <li>完整的报错文本（不要截图，贴文字）</li>
+  <li>最小复现步骤与相关代码 / launch / 参数</li>
+  <li>你已经尝试过的排查步骤与结果（<code>ros2 topic info -v</code>、<code>view_frames</code> 等输出）</li>
+</ol>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章 Launch 系统编排 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch06" data-root="../">
+<main class="content">
+
+<h1>第 6 章　Launch 系统编排</h1>
+<p class="lead">真实机器人往往要同时启动几十个节点。Launch 文件让你用一条命令启动整个系统，并统一管理参数、命名空间、重映射和启动顺序。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 2.5 小时</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>会写 Python launch 文件并正确安装到包中</li>
+  <li>掌握启动参数、参数文件、重映射、命名空间</li>
+  <li>会用 include 分层组织 bringup，用条件和事件控制启动逻辑</li>
+  <li>能读懂 XML / YAML 格式的 launch 文件</li>
+</ul>
+
+<h2>6.1 三种格式</h2>
+<table>
+  <thead><tr><th>格式</th><th>优点</th><th>缺点</th><th>建议</th></tr></thead>
+  <tbody>
+    <tr><td>Python（<code>.launch.py</code>）</td><td>最灵活，可写任意逻辑；官方包大多用它</td><td>较啰嗦</td><td><strong>主力使用</strong></td></tr>
+    <tr><td>XML（<code>.launch.xml</code>）</td><td>简洁，与 ROS1 相似</td><td>逻辑能力有限</td><td>简单场景可用</td></tr>
+    <tr><td>YAML（<code>.launch.yaml</code>）</td><td>简洁</td><td>使用较少</td><td>了解即可</td></tr>
+  </tbody>
+</table>
+
+<h2>6.2 第一个 launch 文件</h2>
+<p>官方经典示例：启动两个海龟仿真器，让第二只海龟模仿第一只的动作。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/launch/turtle_mimic.launch.py">
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+
+def generate_launch_description():          # 函数名固定
+    return LaunchDescription([
+        Node(
+            package='turtlesim',
+            executable='turtlesim_node',
+            namespace='turtlesim1',             # 话题变为 /turtlesim1/turtle1/...
+            name='sim',
+        ),
+        Node(
+            package='turtlesim',
+            executable='turtlesim_node',
+            namespace='turtlesim2',
+            name='sim',
+        ),
+        Node(
+            package='turtlesim',
+            executable='mimic',
+            name='mimic',
+            remappings=[
+                ('/input/pose', '/turtlesim1/turtle1/pose'),
+                ('/output/cmd_vel', '/turtlesim2/turtle1/cmd_vel'),
+            ],
+        ),
+    ])
+</script>
+<h3>安装 launch 文件</h3>
+<p>launch 文件必须被安装到 <code>share/包名/launch</code>，<code>ros2 launch</code> 才能找到。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="Python 包：setup.py">
+import os
+from glob import glob
+from setuptools import find_packages, setup
+
+package_name = 'my_first_nodes'
+
+setup(
+    # ...
+    data_files=[
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+    ],
+    # ...
+)
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="C++ 包：CMakeLists.txt">
+install(DIRECTORY launch config
+  DESTINATION share/${PROJECT_NAME})
+</script>
+<p>在 <code>package.xml</code> 中声明运行依赖 <code>&lt;exec_depend&gt;ros2launch&lt;/exec_depend&gt;</code> 和 <code>&lt;exec_depend&gt;turtlesim&lt;/exec_depend&gt;</code>，然后：</p>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws && colcon build --packages-select my_first_nodes && source install/setup.bash
+ros2 launch my_first_nodes turtle_mimic.launch.py
+
+# 另一终端：让第一只海龟转圈，第二只会跟着转
+ros2 topic pub -r 1 /turtlesim1/turtle1/cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 2.0}, angular: {z: -1.8}}"
+</script>
+
+<h2>6.3 Node 动作的常用参数</h2>
+<table>
+  <thead><tr><th>参数</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>package</code>、<code>executable</code></td><td>运行哪个包的哪个程序</td></tr>
+    <tr><td><code>name</code></td><td>覆盖节点名</td></tr>
+    <tr><td><code>namespace</code></td><td>命名空间</td></tr>
+    <tr><td><code>parameters</code></td><td>参数列表：YAML 文件路径或字典</td></tr>
+    <tr><td><code>remappings</code></td><td>话题 / 服务重映射 <code>[('旧名', '新名')]</code></td></tr>
+    <tr><td><code>arguments</code></td><td>传给程序的命令行参数</td></tr>
+    <tr><td><code>output</code></td><td><code>'screen'</code> 输出到终端，<code>'log'</code> 只写日志文件</td></tr>
+    <tr><td><code>respawn</code>、<code>respawn_delay</code></td><td>进程退出后自动重启（驱动节点常用）</td></tr>
+    <tr><td><code>prefix</code></td><td>启动前缀，如 <code>'gdb -ex run --args'</code> 或 <code>'valgrind'</code></td></tr>
+    <tr><td><code>condition</code></td><td>启动条件</td></tr>
+  </tbody>
+</table>
+
+<h2>6.4 启动参数、参数文件与条件</h2>
+<p>一个可复用的 bringup launch，通常需要从外部接收参数：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/launch/demo.launch.py">
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    robot_name = LaunchConfiguration('robot_name')
+    start_listener = LaunchConfiguration('start_listener')
+
+    params_file = PathJoinSubstitution([
+        FindPackageShare('my_first_nodes'), 'config', 'robot.yaml'
+    ])
+
+    return LaunchDescription([
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='是否使用仿真时间'),
+        DeclareLaunchArgument('robot_name', default_value='bot_01'),
+        DeclareLaunchArgument('start_listener', default_value='true'),
+
+        LogInfo(msg=['启动机器人: ', robot_name]),
+
+        Node(
+            package='my_first_nodes',
+            executable='param_demo',
+            parameters=[
+                params_file,                                  # 先加载 YAML
+                {'robot_name': robot_name,                    # 再用字典覆盖
+                 'use_sim_time': use_sim_time},
+            ],
+            output='screen',
+        ),
+        Node(
+            package='my_first_nodes',
+            executable='talker',
+            output='screen',
+        ),
+        Node(
+            package='my_first_nodes',
+            executable='listener',
+            condition=IfCondition(start_listener),            # 条件启动
+            output='screen',
+        ),
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch my_first_nodes demo.launch.py --show-args       # 查看可用参数
+ros2 launch my_first_nodes demo.launch.py robot_name:=bot_07 start_listener:=false
+</script>
+<div class="callout note">
+  <strong>LaunchConfiguration 不是字符串</strong>
+  <p><code>LaunchConfiguration('robot_name')</code> 是一个「替换值」，在 launch 真正执行时才求值。不能对它做 Python 字符串操作（如 <code>+</code> 或 <code>if x == 'true'</code>）。需要拼接时用列表 <code>['prefix_', robot_name]</code>，需要判断时用 <code>IfCondition</code> / <code>PythonExpression</code>，复杂逻辑用 <code>OpaqueFunction</code>。</p>
+</div>
+<script type="text/plain" class="code" data-lang="python">
+from launch.substitutions import PythonExpression
+from launch.actions import OpaqueFunction
+
+# 表达式条件
+condition=IfCondition(PythonExpression(["'", robot_name, "' == 'bot_01'"]))
+
+# OpaqueFunction：在其中可以拿到真实字符串
+def launch_setup(context):
+    name = LaunchConfiguration('robot_name').perform(context)
+    nodes = []
+    for i in range(3):
+        nodes.append(Node(package='my_first_nodes', executable='talker',
+                          name=f'{name}_talker_{i}'))
+    return nodes
+
+# 在 LaunchDescription 中加入 OpaqueFunction(function=launch_setup)
+</script>
+
+<h2>6.5 包含其他 launch 与多机器人</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/launch/multi_robot.launch.py">
+from launch import LaunchDescription
+from launch.actions import GroupAction, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import PushRosNamespace
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    demo = PathJoinSubstitution([FindPackageShare('my_first_nodes'), 'launch', 'demo.launch.py'])
+
+    robots = []
+    for name in ['robot1', 'robot2']:
+        robots.append(GroupAction([
+            PushRosNamespace(name),             # 组内所有节点加上命名空间
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(demo),
+                launch_arguments={'robot_name': name, 'start_listener': 'false'}.items(),
+            ),
+        ]))
+    return LaunchDescription(robots)
+</script>
+<p>运行后 <code>ros2 topic list</code> 会看到 <code>/robot1/chatter</code> 和 <code>/robot2/chatter</code>。这要求节点代码里使用<strong>相对话题名</strong>（第 2 章）。</p>
+
+<h2>6.6 启动顺序与事件</h2>
+<p>ROS2 launch 默认<strong>并行</strong>启动所有节点，不保证顺序。需要控制时机时：</p>
+<script type="text/plain" class="code" data-lang="python">
+from launch.actions import RegisterEventHandler, TimerAction, Shutdown, EmitEvent
+from launch.event_handlers import OnProcessExit, OnProcessStart
+
+spawner = Node(package='controller_manager', executable='spawner',
+               arguments=['joint_state_broadcaster'])
+diff_drive = Node(package='controller_manager', executable='spawner',
+                  arguments=['diff_drive_controller'])
+
+actions = [
+    spawner,
+    # 1. 某进程退出后再启动另一个（第 12 章 ros2_control 常用）
+    RegisterEventHandler(OnProcessExit(target_action=spawner, on_exit=[diff_drive])),
+
+    # 2. 延时启动
+    TimerAction(period=3.0, actions=[Node(package='rviz2', executable='rviz2')]),
+
+    # 3. 关键节点退出时关闭整个 launch
+    Node(package='my_first_nodes', executable='talker', on_exit=Shutdown()),
+]
+</script>
+<div class="callout tip">
+  <strong>更好的做法：让节点自己等待依赖</strong>
+  <p>延时启动是「碰运气」。更健壮的方式是节点内部 <code>wait_for_service()</code>、等待 TF 可用，或使用生命周期节点由管理器按顺序激活。</p>
+</div>
+
+<h2>6.7 组合节点（Composition）</h2>
+<script type="text/plain" class="code" data-lang="python">
+from launch_ros.actions import ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
+
+container = ComposableNodeContainer(
+    name='image_container',
+    namespace='',
+    package='rclcpp_components',
+    executable='component_container',          # 多线程版：component_container_mt
+    composable_node_descriptions=[
+        ComposableNode(package='composition', plugin='composition::Talker', name='talker',
+                       extra_arguments=[{'use_intra_process_comms': True}]),
+        ComposableNode(package='composition', plugin='composition::Listener', name='listener',
+                       extra_arguments=[{'use_intra_process_comms': True}]),
+    ],
+    output='screen',
+)
+</script>
+
+<h2>6.8 XML 与 YAML 格式</h2>
+<p>与 6.2 的 Python 示例等价：</p>
+<script type="text/plain" class="code" data-lang="xml" data-file="turtle_mimic.launch.xml">
+<launch>
+  <arg name="use_sim_time" default="false"/>
+
+  <node pkg="turtlesim" exec="turtlesim_node" name="sim" namespace="turtlesim1">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+  <node pkg="turtlesim" exec="turtlesim_node" name="sim" namespace="turtlesim2"/>
+  <node pkg="turtlesim" exec="mimic" name="mimic">
+    <remap from="/input/pose" to="/turtlesim1/turtle1/pose"/>
+    <remap from="/output/cmd_vel" to="/turtlesim2/turtle1/cmd_vel"/>
+  </node>
+
+  <!-- 包含其他 launch -->
+  <!-- <include file="$(find-pkg-share my_first_nodes)/launch/demo.launch.py"/> -->
+</launch>
+</script>
+<script type="text/plain" class="code" data-lang="yaml" data-file="turtle_mimic.launch.yaml">
+launch:
+  - node:
+      pkg: turtlesim
+      exec: turtlesim_node
+      name: sim
+      namespace: turtlesim1
+  - node:
+      pkg: turtlesim
+      exec: turtlesim_node
+      name: sim
+      namespace: turtlesim2
+  - node:
+      pkg: turtlesim
+      exec: mimic
+      name: mimic
+      remap:
+        - from: /input/pose
+          to: /turtlesim1/turtle1/pose
+        - from: /output/cmd_vel
+          to: /turtlesim2/turtle1/cmd_vel
+</script>
+
+<h2>6.9 推荐的 bringup 组织方式</h2>
+<pre class="diagram">
+my_robot_bringup/launch/
+├── robot.launch.py          顶层：实车，include 下面几个
+├── sim.launch.py            顶层：仿真，include gazebo + 下面几个
+├── description.launch.py    robot_state_publisher（第 8 章）
+├── drivers.launch.py        传感器与底盘驱动
+├── localization.launch.py   定位
+└── navigation.launch.py     导航（第 13 章）
+</pre>
+<p>每个子 launch 都暴露 <code>use_sim_time</code> 参数，顶层统一传入，避免时间源混乱。</p>
+
+<h2>6.10 调试 launch</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch my_first_nodes demo.launch.py --show-args   # 列出参数
+ros2 launch my_first_nodes demo.launch.py --print       # 只打印将执行的动作，不运行
+ros2 launch my_first_nodes demo.launch.py --debug       # 输出 launch 系统的详细调试信息
+ls ~/.ros/log/                                          # 每次 launch 的日志目录
+</script>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. <code>ros2 launch my_first_nodes demo.launch.py</code> 报 “file 'demo.launch.py' was not found”，最常见原因？</summary>
+<div>launch 文件没有被安装：Python 包的 <code>setup.py</code> 中 <code>data_files</code> 没加 launch 目录，或 C++ 包没写 <code>install(DIRECTORY launch ...)</code>；也可能修改后没有重新构建 / source。</div></details>
+<details class="quiz"><summary>2. 在 launch 中写 <code>if LaunchConfiguration('debug') == 'true':</code> 为什么不起作用？</summary>
+<div><code>LaunchConfiguration</code> 是延迟求值的对象，在 <code>generate_launch_description()</code> 运行时还没有值，比较结果永远是 False。应使用 <code>IfCondition</code> 或在 <code>OpaqueFunction</code> 中用 <code>perform(context)</code> 获取真实值。</div></details>
+<details class="quiz"><summary>3. parameters 列表中同时有 YAML 和字典，同名参数以哪个为准？</summary>
+<div>列表中靠后的覆盖靠前的。<code>[params_file, {'robot_name': ...}]</code> 中字典的值生效。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>turtle_mimic 示例运行成功</li>
+  <li>会声明 launch 参数并从命令行传入</li>
+  <li>会用 <code>FindPackageShare</code> 加载包内的 YAML 参数文件</li>
+  <li>用 <code>GroupAction</code> + <code>PushRosNamespace</code> 启动了两套相同的节点</li>
+  <li>知道如何用事件处理器控制启动顺序</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

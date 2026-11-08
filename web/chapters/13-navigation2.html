@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 13 章 Navigation2 导航 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch13" data-root="../">
+<main class="content">
+
+<h1>第 13 章　Navigation2（Nav2）导航</h1>
+<p class="lead">让机器人自己走到目标点：先用 SLAM 建出地图，再用 AMCL 在地图中定位，最后由 Nav2 规划路径、躲避障碍、执行运动。本章基于第 9 章的仿真小车完成全流程，并用 Python 实现多航点巡逻。</p>
+<div class="meta-bar"><span class="tag">动手约 4–5 小时</span><span class="tag">移动机器人核心</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解 Nav2 的整体架构与各服务器的职责</li>
+  <li>用 slam_toolbox 建图并保存</li>
+  <li>用 AMCL 在已知地图中定位</li>
+  <li>理解代价地图的分层与关键参数</li>
+  <li>理解行为树如何编排导航流程</li>
+  <li>用 Simple Commander API 编程控制导航</li>
+</ul>
+
+<h2>13.1 导航需要什么</h2>
+<table>
+  <thead><tr><th>问题</th><th>谁来回答</th><th>输入 → 输出</th></tr></thead>
+  <tbody>
+    <tr><td>环境长什么样？</td><td>SLAM（slam_toolbox）或地图服务器</td><td>激光 + 里程计 → <code>/map</code></td></tr>
+    <tr><td>我在哪？</td><td>AMCL（或 SLAM 本身）</td><td>地图 + 激光 + 里程计 → <code>map→odom</code> TF</td></tr>
+    <tr><td>怎么走过去？</td><td>Planner Server（全局规划）</td><td>地图 + 起点 + 终点 → 路径</td></tr>
+    <tr><td>当下怎么动？</td><td>Controller Server（局部控制）</td><td>路径 + 局部障碍 → <code>/cmd_vel</code></td></tr>
+    <tr><td>卡住了怎么办？</td><td>Behavior Server（恢复行为）</td><td>原地旋转、后退、等待、清除代价地图</td></tr>
+    <tr><td>以上如何协调？</td><td>BT Navigator（行为树）</td><td>目标 → 调用上述服务器</td></tr>
+  </tbody>
+</table>
+
+<h2>13.2 Nav2 架构</h2>
+<pre class="diagram">
+                         NavigateToPose / NavigateThroughPoses / FollowWaypoints（Action）
+                                              │
+                                              ▼
+                                   ┌────────────────────┐
+                                   │    BT Navigator    │  行为树：规划 → 跟随 → 失败则恢复
+                                   └───┬──────┬──────┬──┘
+                ComputePathToPose      │      │      │   Spin / BackUp / Wait
+                ┌──────────────────────┘      │      └─────────────────────┐
+                ▼                    FollowPath ▼                           ▼
+       ┌─────────────────┐         ┌────────────────────┐        ┌─────────────────┐
+       │ Planner Server  │         │ Controller Server  │        │ Behavior Server │
+       │ global_costmap  │         │ local_costmap      │        │                 │
+       └─────────────────┘         └─────────┬──────────┘        └─────────────────┘
+                                             │ cmd_vel_nav
+                                    ┌────────▼────────┐     ┌───────────────────┐
+                                    │ Velocity Smoother├────►│ Collision Monitor │──► /cmd_vel
+                                    └─────────────────┘     └───────────────────┘
+       Map Server / AMCL（或 SLAM）提供 /map 与 map→odom；Lifecycle Manager 按顺序激活所有服务器
+</pre>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-slam-toolbox \
+  ros-jazzy-nav2-minimal-tb3-sim
+</script>
+<div class="callout tip">
+  <strong>先跑官方示例建立直观认识</strong>
+  <p><code>ros2 launch nav2_bringup tb3_simulation_launch.py headless:=False</code> 会启动 TurtleBot3 仿真 + 完整 Nav2。在 RViz 点「2D Pose Estimate」给初始位置，再点「Nav2 Goal」给目标，观察机器人规划并移动。</p>
+</div>
+
+<h2>13.3 第一步：SLAM 建图</h2>
+<p>启动第 9 章的仿真（使用 Gazebo DiffDrive 插件的版本，它发布 <code>/cmd_vel</code>(Twist)、<code>/odom</code>、<code>/scan</code>，与 Nav2 默认配置一致）：</p>
+<script type="text/plain" class="code" data-lang="bash">
+# 终端 1：仿真
+ros2 launch my_bot_gazebo sim.launch.py
+
+# 终端 2：SLAM（异步在线模式）
+ros2 launch slam_toolbox online_async_launch.py use_sim_time:=true
+
+# 终端 3：键盘遥控，慢速绕房间走一圈
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+</script>
+<p>RViz 中 Fixed Frame 改为 <code>map</code>，添加 Map 显示（Topic <code>/map</code>），可以看到地图随着行驶逐步生成。</p>
+<div class="callout tip">
+  <strong>建图技巧</strong>
+  <ul>
+    <li>速度放慢（线速度 0.2 m/s 以下，转弯更慢），里程计误差越小地图越准。</li>
+    <li>最后回到起点附近，让 SLAM 检测到「回环」并修正累计误差。</li>
+    <li>避免长时间面对空旷区域或玻璃，激光特征少会导致匹配失败。</li>
+  </ul>
+</div>
+<h3>保存地图</h3>
+<script type="text/plain" class="code" data-lang="bash">
+mkdir -p ~/maps
+ros2 run nav2_map_server map_saver_cli -f ~/maps/room
+# 生成 room.yaml 与 room.pgm
+</script>
+<script type="text/plain" class="code" data-lang="yaml" data-file="~/maps/room.yaml">
+image: room.pgm              # 栅格图片：白=空闲，黑=占据，灰=未知
+mode: trinary
+resolution: 0.05             # 每像素 0.05 m
+origin: [-4.86, -4.62, 0]    # 图片左下角像素在 map 坐标系中的位置 (x, y, yaw)
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
+</script>
+<p>地图图片可以用 GIMP 等工具手动编辑，例如涂黑不希望机器人进入的区域（更规范的做法是使用 Keepout 过滤器）。</p>
+
+<h2>13.4 第二步：定位与导航</h2>
+<p>关闭 SLAM 和 teleop，保持仿真运行，启动 Nav2：</p>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch nav2_bringup bringup_launch.py \
+  use_sim_time:=true \
+  map:=$HOME/maps/room.yaml
+
+# 新终端：带 Nav2 面板的 RViz 配置
+ros2 launch nav2_bringup rviz_launch.py
+</script>
+<ol>
+  <li>RViz 工具栏点 <strong>2D Pose Estimate</strong>，在地图上机器人实际位置处点击并拖出朝向。AMCL 粒子云（绿色箭头）会收敛。</li>
+  <li>点 <strong>Nav2 Goal</strong>，在目标处点击并拖出朝向，机器人开始导航。</li>
+  <li>观察：绿色线是全局路径，局部代价地图中障碍物周围有彩色膨胀区。</li>
+</ol>
+<div class="callout note">
+  <strong>边建图边导航</strong>
+  <p>也可以不保存地图：同时运行 slam_toolbox 和 <code>ros2 launch nav2_bringup navigation_launch.py use_sim_time:=true</code>（不含 AMCL 和地图服务器，定位由 SLAM 提供）。适合探索未知环境。</p>
+</div>
+
+<h2>13.5 参数文件</h2>
+<p>先把官方默认参数复制到自己的包中再修改：</p>
+<script type="text/plain" class="code" data-lang="bash">
+mkdir -p ~/ros2_ws/src/my_bot_navigation/config
+cp /opt/ros/jazzy/share/nav2_bringup/params/nav2_params.yaml ~/ros2_ws/src/my_bot_navigation/config/
+# 启动时：params_file:=<路径>/nav2_params.yaml
+</script>
+<p>下面是需要根据机器人修改的关键部分（节选）：</p>
+<script type="text/plain" class="code" data-lang="yaml" data-file="nav2_params.yaml（关键节选）">
+amcl:
+  ros__parameters:
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    global_frame_id: "map"
+    scan_topic: scan
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    max_particles: 2000
+    min_particles: 500
+    laser_max_range: 12.0
+    set_initial_pose: true                 # 启动时自动设置初始位姿
+    initial_pose: {x: 0.0, y: 0.0, z: 0.0, yaw: 0.0}
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    controller_plugins: ["FollowPath"]
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.4
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.9
+      use_velocity_scaled_lookahead_dist: true
+      use_rotate_to_heading: true
+      rotate_to_heading_angular_vel: 1.2
+      use_collision_detection: true
+
+planner_server:
+  ros__parameters:
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_smac_planner::SmacPlanner2D"
+      tolerance: 0.25
+      allow_unknown: true
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      robot_radius: 0.26                   # 外接圆半径；非圆形机器人用 footprint
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        observation_sources: scan
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          marking: true
+          clearing: true
+          obstacle_max_range: 2.5
+          raytrace_max_range: 3.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.55
+        cost_scaling_factor: 3.0
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: map
+      robot_base_frame: base_link
+      robot_radius: 0.26
+      resolution: 0.05
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # obstacle_layer / inflation_layer 配置同上
+
+velocity_smoother:
+  ros__parameters:
+    max_velocity: [0.5, 0.0, 2.0]          # [x, y, theta]
+    min_velocity: [-0.5, 0.0, -2.0]
+    max_accel: [1.0, 0.0, 3.0]
+    max_decel: [-1.0, 0.0, -3.0]
+</script>
+<div class="callout warn">
+  <strong>robot_radius 与 footprint</strong>
+  <p>my_bot 车身 0.4 × 0.3 m，外接圆半径 = √(0.2² + 0.15²) ≈ 0.25 m，再留一点余量取 0.26。对于长方形机器人，用 <code>footprint: "[[0.22, 0.17], [0.22, -0.17], [-0.22, -0.17], [-0.22, 0.17]]"</code> 更精确，可以通过更窄的通道。</p>
+</div>
+
+<h2>13.6 代价地图详解</h2>
+<p>代价地图把世界划分为栅格，每格一个 0–255 的代价值：</p>
+<table>
+  <thead><tr><th>代价</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>空闲</td></tr>
+    <tr><td>1–252</td><td>靠近障碍物，越大越危险（膨胀层产生）</td></tr>
+    <tr><td>253</td><td>内切：机器人中心在此必然碰撞</td></tr>
+    <tr><td>254</td><td>致命：障碍物本身</td></tr>
+    <tr><td>255</td><td>未知</td></tr>
+  </tbody>
+</table>
+<table>
+  <thead><tr><th>层</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td>StaticLayer</td><td>来自 <code>/map</code> 的静态障碍</td></tr>
+    <tr><td>ObstacleLayer</td><td>来自激光的实时障碍（2D），可标记与清除</td></tr>
+    <tr><td>VoxelLayer</td><td>来自点云 / 深度相机的 3D 障碍，投影到 2D</td></tr>
+    <tr><td>InflationLayer</td><td>在障碍周围按距离指数衰减地增加代价</td></tr>
+    <tr><td>KeepoutFilter / SpeedFilter</td><td>禁行区、限速区（配合掩膜地图）</td></tr>
+  </tbody>
+</table>
+<p><code>inflation_radius</code> 决定机器人离墙多远就开始「感到不适」，<code>cost_scaling_factor</code> 越大代价衰减越快（越敢贴墙）。机器人总在走廊中间画龙或过不了门，多半要调这两个参数。</p>
+
+<h2>13.7 规划器与控制器选择</h2>
+<table>
+  <thead><tr><th>插件</th><th>类型</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr><td>NavFn</td><td>规划器</td><td>经典 Dijkstra / A*，简单可靠</td></tr>
+    <tr><td>Smac 2D</td><td>规划器</td><td>2D A*，路径更平滑，推荐圆形差速机器人</td></tr>
+    <tr><td>Smac Hybrid-A*</td><td>规划器</td><td>考虑最小转弯半径，适合阿克曼（汽车式）底盘</td></tr>
+    <tr><td>Smac State Lattice</td><td>规划器</td><td>任意运动学约束、非圆形机器人</td></tr>
+    <tr><td>Theta*</td><td>规划器</td><td>任意角度直线路径</td></tr>
+    <tr><td>Regulated Pure Pursuit</td><td>控制器</td><td>跟踪路径，参数直观，适合初学和服务机器人</td></tr>
+    <tr><td>DWB</td><td>控制器</td><td>动态窗口法，可调评分项多</td></tr>
+    <tr><td>MPPI</td><td>控制器</td><td>模型预测，效果最好但计算量大</td></tr>
+    <tr><td>Graceful Controller</td><td>控制器</td><td>平滑接近目标位姿</td></tr>
+  </tbody>
+</table>
+
+<h2>13.8 行为树</h2>
+<p>BT Navigator 使用 BehaviorTree.CPP 的 XML 行为树。默认树的简化版本如下：</p>
+<script type="text/plain" class="code" data-lang="xml" data-file="简化的 navigate_to_pose 行为树">
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">                     <!-- 每秒重新规划一次 -->
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+        </RateController>
+        <FollowPath path="{path}" controller_id="FollowPath"/>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">      <!-- 失败后依次尝试恢复 -->
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <ClearEntireCostmap service_name="local_costmap/clear_entirely_local_costmap"/>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5.0"/>
+          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
+</script>
+<table>
+  <thead><tr><th>节点类型</th><th>行为</th></tr></thead>
+  <tbody>
+    <tr><td>Sequence / PipelineSequence</td><td>按顺序执行子节点，全部成功才成功</td></tr>
+    <tr><td>Fallback / ReactiveFallback</td><td>依次尝试子节点，一个成功即成功</td></tr>
+    <tr><td>RecoveryNode</td><td>第一个子节点失败时执行第二个（恢复），然后重试</td></tr>
+    <tr><td>RateController</td><td>限制子节点执行频率</td></tr>
+    <tr><td>动作节点</td><td>ComputePathToPose、FollowPath、Spin 等，调用对应服务器</td></tr>
+  </tbody>
+</table>
+<p>可在参数 <code>bt_navigator.default_nav_to_pose_bt_xml</code> 中指定自定义行为树，例如加入「电量低则先去充电」的逻辑。用 Groot2 可以图形化编辑和实时监视行为树。</p>
+
+<h2>13.9 用 Python 编程导航</h2>
+<p><code>nav2_simple_commander</code> 封装了 Nav2 的各种 Action，适合编写上层业务逻辑：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/patrol.py">
+import math
+
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+
+
+def make_pose(nav, x, y, yaw):
+    pose = PoseStamped()
+    pose.header.frame_id = 'map'
+    pose.header.stamp = nav.get_clock().now().to_msg()
+    pose.pose.position.x = x
+    pose.pose.position.y = y
+    pose.pose.orientation.z = math.sin(yaw / 2)
+    pose.pose.orientation.w = math.cos(yaw / 2)
+    return pose
+
+
+def main():
+    rclpy.init()
+    nav = BasicNavigator()
+
+    nav.setInitialPose(make_pose(nav, 0.0, 0.0, 0.0))   # 等价于 RViz 的 2D Pose Estimate
+    nav.waitUntilNav2Active()                           # 等待 AMCL 与各服务器激活
+
+    route = [(2.5, 0.0, 0.0), (2.5, -2.5, -1.57), (-2.5, -2.5, 3.14),
+             (-2.5, 0.5, 1.57), (0.0, 0.0, 0.0)]
+    waypoints = [make_pose(nav, *p) for p in route]
+
+    for lap in range(3):
+        nav.followWaypoints(waypoints)
+        while not nav.isTaskComplete():
+            feedback = nav.getFeedback()
+            if feedback:
+                print(f'第 {lap + 1} 圈，前往航点 {feedback.current_waypoint + 1}/{len(waypoints)}',
+                      end='\r')
+
+        result = nav.getResult()
+        if result == TaskResult.SUCCEEDED:
+            print(f'\n第 {lap + 1} 圈完成')
+        elif result == TaskResult.CANCELED:
+            print('\n任务被取消')
+            break
+        else:
+            print('\n任务失败')
+            break
+
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<table>
+  <thead><tr><th>方法</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>goToPose(pose)</code></td><td>导航到单个目标</td></tr>
+    <tr><td><code>goThroughPoses(poses)</code></td><td>经过一系列位姿到达终点（不在中间停留）</td></tr>
+    <tr><td><code>followWaypoints(poses)</code></td><td>依次到达每个航点（可在每个航点执行任务）</td></tr>
+    <tr><td><code>cancelTask()</code></td><td>取消当前任务</td></tr>
+    <tr><td><code>getPath(start, goal)</code></td><td>只规划不执行，用于估算距离</td></tr>
+    <tr><td><code>clearAllCostmaps()</code></td><td>清除代价地图</td></tr>
+  </tbody>
+</table>
+
+<h2>13.10 调参与排错</h2>
+<table>
+  <thead><tr><th>现象</th><th>可能原因与处理</th></tr></thead>
+  <tbody>
+    <tr><td>Nav2 一直不 Ready</td><td>AMCL 没有初始位姿（设置 2D Pose Estimate 或 <code>set_initial_pose</code>）；TF 不完整；地图路径错误</td></tr>
+    <tr><td>“Failed to create plan”</td><td>目标在障碍物或膨胀区内；起点在致命区（初始位姿错误）；<code>allow_unknown</code> 为 false 且目标在未知区</td></tr>
+    <tr><td>过不了门 / 窄道</td><td>减小 <code>inflation_radius</code> 或 <code>robot_radius</code>，改用精确 footprint</td></tr>
+    <tr><td>在目标附近来回打转</td><td>放宽 goal checker 的 <code>xy_goal_tolerance</code> / <code>yaw_goal_tolerance</code></td></tr>
+    <tr><td>定位漂移、粒子发散</td><td>里程计质量差；激光与 TF 安装位置不符；AMCL 的 <code>alpha1~alpha5</code>（运动噪声）需调整</td></tr>
+    <tr><td>代价地图有「幽灵障碍」</td><td>激光 <code>clearing</code> 未开启；<code>raytrace_max_range</code> 小于 <code>obstacle_max_range</code></td></tr>
+    <tr><td>机器人不动但有路径</td><td><code>/cmd_vel</code> 没有到达底盘：话题名、Twist / TwistStamped 类型、collision_monitor 是否阻止</td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么局部代价地图使用 <code>odom</code> 坐标系，而全局代价地图使用 <code>map</code>？</summary>
+<div>局部控制需要平滑连续的坐标，odom 不会跳变；全局规划需要与地图一致的坐标，map 是全局准确的。若局部代价地图用 map，AMCL 修正时障碍物位置会突然跳动，导致控制抖动。</div></details>
+<details class="quiz"><summary>2. SLAM 和 AMCL 能同时运行吗？</summary>
+<div>不应该。两者都会发布 map→odom 变换，会产生冲突。建图阶段用 SLAM；有了地图后用地图服务器 + AMCL；或者用 slam_toolbox 的 localization 模式替代 AMCL。</div></details>
+<details class="quiz"><summary>3. 行为树中 RecoveryNode 的 number_of_retries=6 是什么意思？</summary>
+<div>导航子树失败时执行恢复动作然后重试，最多重试 6 次；6 次后仍失败，整个导航任务返回失败。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>跑通官方 tb3_simulation_launch.py 示例</li>
+  <li>用 slam_toolbox 为 room 世界建出完整地图并保存</li>
+  <li>在已保存的地图上用 AMCL 定位并通过 RViz 导航成功</li>
+  <li>能解释 inflation_radius、robot_radius 对导航的影响</li>
+  <li>能读懂默认行为树的结构</li>
+  <li>patrol.py 能让机器人自动巡逻 3 圈</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

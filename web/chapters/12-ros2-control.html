@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 12 章 ros2_control · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch12" data-root="../">
+<main class="content">
+
+<h1>第 12 章　ros2_control</h1>
+<p class="lead">ros2_control 把「控制算法」和「硬件读写」解耦：同一套控制器既能驱动 Gazebo 中的仿真车，也能驱动真实电机，只需更换硬件插件。本章把小车改造为使用 ros2_control，并介绍如何为真实硬件编写接口。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3–4 小时</span><span class="tag">进阶</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解 controller_manager、硬件接口、控制器三者的关系</li>
+  <li>在 URDF 中声明 <code>&lt;ros2_control&gt;</code> 标签</li>
+  <li>配置并启动 diff_drive_controller 与 joint_state_broadcaster</li>
+  <li>在 Gazebo 中通过 gz_ros2_control 运行</li>
+  <li>了解自定义硬件接口的编写方法</li>
+</ul>
+
+<h2>12.1 为什么需要 ros2_control</h2>
+<p>第 9 章中我们使用 Gazebo 自带的 DiffDrive 插件，它只能在仿真里用。换成真实机器人时，需要另写一个驱动节点来订阅 <code>/cmd_vel</code>、计算轮速、读编码器、发布里程计——这部分逻辑与仿真插件重复，且两边行为可能不一致。</p>
+<p>ros2_control 的思路：</p>
+<pre class="diagram">
+             /diff_drive_controller/cmd_vel                    /joint_states
+                         │                                          ▲
+                         ▼                                          │
+ ┌───────────────────── controller_manager（实时循环，如 50 Hz）──────────────────┐
+ │   ┌──────────────────────────┐        ┌──────────────────────────────┐      │
+ │   │ diff_drive_controller     │        │ joint_state_broadcaster      │      │  ← 控制器（与硬件无关）
+ │   │ 速度 → 左右轮角速度 + 里程计 │        │ 读取关节状态并发布             │      │
+ │   └──────────┬───────────────┘        └──────────────▲───────────────┘      │
+ │       command interfaces（velocity）     state interfaces（position, velocity） │
+ │   ┌──────────▼────────────────────────────────────────┴───────────────┐      │
+ │   │          Resource Manager：管理所有硬件接口                          │      │
+ │   └──────────┬─────────────────────────────────────────────────────────┘      │
+ └──────────────┼──────────────────────────────────────────────────────────────────┘
+                ▼   read() / write()
+   ┌──────────────────────┬─────────────────────────┬──────────────────────────┐
+   │ gz_ros2_control      │ mock_components         │ 你的串口 / CAN 驱动插件     │  ← 硬件接口（可替换）
+   │ （Gazebo 仿真）        │ （无硬件测试）            │ （真实机器人）              │
+   └──────────────────────┴─────────────────────────┴──────────────────────────┘
+</pre>
+<table>
+  <thead><tr><th>组件</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td>controller_manager</td><td>按固定频率循环：<code>read()</code> 硬件 → <code>update()</code> 控制器 → <code>write()</code> 硬件；管理控制器的加载、激活、切换</td></tr>
+    <tr><td>硬件接口（Hardware Interface）</td><td>暴露 state interface（可读：位置、速度、力矩）和 command interface（可写：速度、位置、力矩）</td></tr>
+    <tr><td>控制器（Controller）</td><td>读取 state、计算并写入 command，同时提供 ROS 话题 / 动作接口</td></tr>
+  </tbody>
+</table>
+
+<h2>12.2 常用控制器</h2>
+<table>
+  <thead><tr><th>控制器</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td><code>joint_state_broadcaster</code></td><td>把所有关节状态发布到 <code>/joint_states</code>（几乎必用）</td></tr>
+    <tr><td><code>diff_drive_controller</code></td><td>差速底盘：速度指令 → 左右轮速度，发布里程计和 TF</td></tr>
+    <tr><td><code>mecanum_drive_controller</code> / <code>tricycle_controller</code></td><td>麦克纳姆轮 / 三轮底盘</td></tr>
+    <tr><td><code>joint_trajectory_controller</code></td><td>机械臂轨迹跟踪，提供 <code>FollowJointTrajectory</code> 动作（MoveIt 使用）</td></tr>
+    <tr><td><code>forward_command_controller</code></td><td>直接把话题中的值转发给关节（调试用）</td></tr>
+    <tr><td><code>gripper_controllers</code></td><td>夹爪</td></tr>
+    <tr><td><code>imu_sensor_broadcaster</code></td><td>发布 IMU 数据</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-ros2-control ros-jazzy-ros2-controllers ros-jazzy-gz-ros2-control
+</script>
+
+<h2>12.3 在 URDF 中声明硬件</h2>
+<p>为第 8 章的小车新建 <code>ros2_control.xacro</code>。通过 xacro 参数在 Gazebo 与模拟硬件之间切换：</p>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_description/urdf/ros2_control.xacro">
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="wheel_interfaces" params="name">
+    <joint name="${name}">
+      <command_interface name="velocity">
+        <param name="min">-10</param>
+        <param name="max">10</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <ros2_control name="MyBotSystem" type="system">
+    <hardware>
+      <xacro:if value="$(arg sim_gazebo)">
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+      </xacro:if>
+      <xacro:unless value="$(arg sim_gazebo)">
+        <plugin>mock_components/GenericSystem</plugin>
+        <param name="calculate_dynamics">true</param>
+      </xacro:unless>
+    </hardware>
+    <xacro:wheel_interfaces name="left_wheel_joint"/>
+    <xacro:wheel_interfaces name="right_wheel_joint"/>
+  </ros2_control>
+
+  <xacro:if value="$(arg sim_gazebo)">
+    <gazebo>
+      <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+        <parameters>$(find my_bot_description)/config/controllers.yaml</parameters>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+
+</robot>
+</script>
+<p>修改主文件 <code>my_bot.urdf.xacro</code>：在开头声明参数，并按条件引入插件，避免 Gazebo 自带 DiffDrive 与 ros2_control 同时控制车轮：</p>
+<script type="text/plain" class="code" data-lang="xml">
+<robot name="my_bot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="use_ros2_control" default="false"/>
+  <xacro:arg name="sim_gazebo" default="true"/>
+  ...
+  <!-- 文件末尾 -->
+  <xacro:include filename="gazebo.xacro"/>
+  <xacro:if value="$(arg use_ros2_control)">
+    <xacro:include filename="ros2_control.xacro"/>
+  </xacro:if>
+</robot>
+</script>
+<p>并在 <code>gazebo.xacro</code> 中把 DiffDrive 与 JointStatePublisher 两个插件包进 <code>&lt;xacro:unless value="$(arg use_ros2_control)"&gt; ... &lt;/xacro:unless&gt;</code>，激光雷达部分保持不变。</p>
+
+<h2>12.4 控制器配置</h2>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_description/config/controllers.yaml">
+controller_manager:
+  ros__parameters:
+    update_rate: 50                       # 控制循环频率 Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+diff_drive_controller:
+  ros__parameters:
+    left_wheel_names: ["left_wheel_joint"]
+    right_wheel_names: ["right_wheel_joint"]
+    wheel_separation: 0.35
+    wheel_radius: 0.05
+
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    enable_odom_tf: true                  # 发布 odom -> base_footprint
+    publish_rate: 50.0
+    open_loop: false                      # 用编码器反馈计算里程计
+    cmd_vel_timeout: 0.5                  # 0.5 秒没收到指令自动停车（安全）
+
+    pose_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+    twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+
+    linear.x.has_velocity_limits: true
+    linear.x.max_velocity: 0.5
+    linear.x.min_velocity: -0.5
+    linear.x.has_acceleration_limits: true
+    linear.x.max_acceleration: 1.0
+    angular.z.has_velocity_limits: true
+    angular.z.max_velocity: 2.0
+    angular.z.min_velocity: -2.0
+</script>
+<p>记得把 <code>config</code> 加入 <code>my_bot_description</code> 的 <code>install(DIRECTORY ...)</code>。</p>
+<div class="callout note">
+  <strong>版本差异</strong>
+  <p>Kilted 及更新版本中 <code>has_velocity_limits</code> 等开关已弃用（限值不为 NaN 即生效）。参数名称以你所用发行版的 <a href="https://control.ros.org/" target="_blank" rel="noopener">control.ros.org</a> 文档为准。</p>
+</div>
+
+<h2>12.5 启动文件</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_gazebo/launch/sim_control.launch.py">
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import Command, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    desc_pkg = FindPackageShare('my_bot_description')
+    gz_pkg = FindPackageShare('my_bot_gazebo')
+
+    robot_description = ParameterValue(Command([
+        'xacro ', PathJoinSubstitution([desc_pkg, 'urdf', 'my_bot.urdf.xacro']),
+        ' use_ros2_control:=true sim_gazebo:=true',
+    ]), value_type=str)
+
+    gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('ros_gz_sim'), 'launch', 'gz_sim.launch.py'])),
+        launch_arguments={'gz_args': ['-r ', PathJoinSubstitution([gz_pkg, 'worlds', 'room.sdf'])]}.items())
+
+    rsp = Node(package='robot_state_publisher', executable='robot_state_publisher',
+               parameters=[{'robot_description': robot_description, 'use_sim_time': True}])
+
+    spawn = Node(package='ros_gz_sim', executable='create',
+                 arguments=['-topic', 'robot_description', '-name', 'my_bot', '-z', '0.05'])
+
+    # 只桥接时钟和激光；cmd_vel / odom / tf / joint_states 由 ros2_control 提供
+    bridge = Node(package='ros_gz_bridge', executable='parameter_bridge',
+                  arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+                             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan'],
+                  parameters=[{'use_sim_time': True}])
+
+    jsb_spawner = Node(package='controller_manager', executable='spawner',
+                       arguments=['joint_state_broadcaster'])
+    diff_spawner = Node(package='controller_manager', executable='spawner',
+                        arguments=['diff_drive_controller'])
+
+    return LaunchDescription([
+        gazebo, rsp, spawn, bridge,
+        # 机器人生成后再加载控制器，确保 controller_manager 已就绪
+        RegisterEventHandler(OnProcessExit(target_action=spawn, on_exit=[jsb_spawner])),
+        RegisterEventHandler(OnProcessExit(target_action=jsb_spawner, on_exit=[diff_spawner])),
+    ])
+</script>
+<h3>运行与遥控</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch my_bot_gazebo sim_control.launch.py
+
+ros2 control list_controllers
+# joint_state_broadcaster  joint_state_broadcaster/JointStateBroadcaster  active
+# diff_drive_controller    diff_drive_controller/DiffDriveController      active
+
+# Jazzy 的 diff_drive_controller 只接收 TwistStamped，话题在控制器命名空间下
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args \
+  -p stamped:=true -r cmd_vel:=/diff_drive_controller/cmd_vel
+</script>
+<div class="callout warn">
+  <strong>Twist 还是 TwistStamped</strong>
+  <p>Jazzy 起 diff_drive_controller 只接受 <code>geometry_msgs/msg/TwistStamped</code>，里程计发布在 <code>/diff_drive_controller/odom</code>。与 Nav2 联用时，需在 Nav2 参数中开启带时间戳的速度指令（<code>enable_stamped_cmd_vel: true</code>），并把 <code>/cmd_vel</code> 重映射到控制器话题。话题类型不匹配时不会报错，只是车不动——用 <code>ros2 topic info -v</code> 检查。</p>
+</div>
+
+<h2>12.6 controller_manager 命令</h2>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 control list_controllers                 # 控制器及状态
+ros2 control list_hardware_interfaces         # 所有接口及占用情况（[claimed]）
+ros2 control list_hardware_components         # 硬件组件
+ros2 control list_controller_types            # 可用的控制器类型
+
+ros2 control load_controller my_ctrl --set-state active
+ros2 control switch_controllers --deactivate diff_drive_controller --activate forward_velocity_controller
+</script>
+<p>控制器同样有生命周期：unconfigured → inactive → active。一个 command interface 同一时刻只能被一个 active 控制器占用，切换控制器即可在「自动驾驶」和「手动」模式间切换。</p>
+
+<h2>12.7 无硬件测试：mock_components</h2>
+<p>用 <code>sim_gazebo:=false</code> 生成 URDF 时，硬件插件为 <code>mock_components/GenericSystem</code>：它把收到的速度命令直接积分为位置状态，相当于「理想电机」。不启动 Gazebo 也能测试控制器配置和上层逻辑：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="不依赖 Gazebo 的 ros2_control_node（片段）">
+control_node = Node(
+    package='controller_manager', executable='ros2_control_node',
+    parameters=[PathJoinSubstitution([desc_pkg, 'config', 'controllers.yaml'])],
+    remappings=[('~/robot_description', '/robot_description')],
+    output='screen')
+# robot_state_publisher 照常启动，robot_description 使用 use_ros2_control:=true sim_gazebo:=false
+# Jazzy 起 ros2_control_node 从 robot_description 话题获取 URDF，因此需要上面的重映射
+</script>
+
+<h2>12.8 编写真实硬件接口（概览）</h2>
+<p>真实机器人需要实现一个 <code>hardware_interface::SystemInterface</code> 插件，负责与电机驱动板通信。骨架如下：</p>
+<script type="text/plain" class="code" data-lang="cpp" data-file="my_bot_hardware/src/my_bot_system.cpp（骨架）">
+#include "hardware_interface/system_interface.hpp"
+#include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "pluginlib/class_list_macros.hpp"
+
+namespace my_bot_hardware
+{
+class MyBotSystem : public hardware_interface::SystemInterface
+{
+public:
+  hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo & info) override
+  {
+    if (SystemInterface::on_init(info) != CallbackReturn::SUCCESS) {return CallbackReturn::ERROR;}
+    port_ = info_.hardware_parameters["serial_port"];       // URDF 中 <param name="serial_port">
+    pos_.assign(info_.joints.size(), 0.0);
+    vel_.assign(info_.joints.size(), 0.0);
+    cmd_.assign(info_.joints.size(), 0.0);
+    return CallbackReturn::SUCCESS;
+  }
+
+  std::vector<hardware_interface::StateInterface> export_state_interfaces() override
+  {
+    std::vector<hardware_interface::StateInterface> s;
+    for (size_t i = 0; i < info_.joints.size(); ++i) {
+      s.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_POSITION, &pos_[i]);
+      s.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &vel_[i]);
+    }
+    return s;
+  }
+
+  std::vector<hardware_interface::CommandInterface> export_command_interfaces() override
+  {
+    std::vector<hardware_interface::CommandInterface> c;
+    for (size_t i = 0; i < info_.joints.size(); ++i) {
+      c.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &cmd_[i]);
+    }
+    return c;
+  }
+
+  hardware_interface::CallbackReturn on_activate(const rclcpp_lifecycle::State &) override
+  {
+    // 打开串口、使能电机
+    return CallbackReturn::SUCCESS;
+  }
+
+  hardware_interface::return_type read(const rclcpp::Time &, const rclcpp::Duration & period) override
+  {
+    // 从驱动板读取编码器，换算为弧度和弧度/秒，写入 pos_ / vel_
+    return hardware_interface::return_type::OK;
+  }
+
+  hardware_interface::return_type write(const rclcpp::Time &, const rclcpp::Duration &) override
+  {
+    // 把 cmd_（rad/s）换算为驱动板需要的单位并发送
+    return hardware_interface::return_type::OK;
+  }
+
+private:
+  std::string port_;
+  std::vector<double> pos_, vel_, cmd_;
+};
+}  // namespace my_bot_hardware
+
+PLUGINLIB_EXPORT_CLASS(my_bot_hardware::MyBotSystem, hardware_interface::SystemInterface)
+</script>
+<p>此外还需要一个插件描述 XML，并在 CMake 中用 <code>pluginlib_export_plugin_description_file(hardware_interface my_bot_hardware.xml)</code> 导出。完整示例参考官方 <a href="https://github.com/ros-controls/ros2_control_demos" target="_blank" rel="noopener">ros2_control_demos</a> 的 example_2（差速车）。</p>
+<div class="callout danger">
+  <strong>read() / write() 运行在实时循环中</strong>
+  <p>不要在其中分配内存、打印大量日志或做阻塞 I/O（如等待串口回复超过一个周期）。串口通信通常放到独立线程，read/write 只交换缓存数据。</p>
+</div>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么在 ros2_control 模式下要移除 Gazebo 的 DiffDrive 插件和 /odom、/tf 桥接？</summary>
+<div>否则会有两套系统同时控制车轮、同时发布 odom→base_footprint 的 TF，导致冲突与跳变。ros2_control 模式下这些都由 diff_drive_controller 和 joint_state_broadcaster 提供。</div></details>
+<details class="quiz"><summary>2. <code>cmd_vel_timeout</code> 有什么作用？</summary>
+<div>安全保护：上层节点崩溃或网络中断导致长时间收不到指令时，控制器自动把速度设为 0，防止机器人带着最后一个速度指令冲出去。</div></details>
+<details class="quiz"><summary>3. 同一个车轮的 velocity command interface 能同时被两个控制器使用吗？</summary>
+<div>不能。资源管理器保证一个 command interface 同时只被一个 active 控制器占用（claimed）。需要切换时用 <code>switch_controllers</code>。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能画出 controller_manager、控制器、硬件接口的关系</li>
+  <li>URDF 中正确声明了 ros2_control 标签</li>
+  <li>Gazebo 中 diff_drive_controller 处于 active，可用键盘控制</li>
+  <li>会用 <code>ros2 control</code> 命令查看与切换控制器</li>
+  <li>理解自定义硬件接口中 read / write 的职责</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

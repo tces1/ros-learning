@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 8 章 URDF / Xacro 机器人描述 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch08" data-root="../">
+<main class="content">
+
+<h1>第 8 章　URDF / Xacro 机器人描述</h1>
+<p class="lead">用 URDF 描述机器人的形状、关节、质量与传感器安装位置；用 Xacro 消除重复；最终在 RViz 中显示出一辆完整的差速小车。本章的模型会在第 9、12、16 章持续使用。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">产出：my_bot_description 包</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解 link、joint 以及 visual / collision / inertial 三种属性</li>
+  <li>掌握 6 种关节类型</li>
+  <li>用 Xacro 的属性、数学表达式、宏编写可参数化的模型</li>
+  <li>用 <code>robot_state_publisher</code> 发布 TF，在 RViz 中显示与调试模型</li>
+</ul>
+
+<h2>8.1 URDF 是什么</h2>
+<p>URDF（Unified Robot Description Format）是一个 XML 文件，把机器人描述为由<strong>关节（joint）</strong>连接的<strong>连杆（link）</strong>组成的树。</p>
+<pre class="diagram">
+            base_footprint
+                 │ (fixed)
+             base_link ────────────────┬──────────────┬──────────────┐
+                 │ (continuous)        │ (continuous) │ (fixed)      │ (fixed)
+          left_wheel_link     right_wheel_link   caster_link    laser_link
+</pre>
+<p>谁会用到 URDF：</p>
+<ul>
+  <li><code>robot_state_publisher</code>：根据 URDF 和关节角度计算并发布所有 link 的 TF</li>
+  <li>RViz：显示机器人外观</li>
+  <li>Gazebo：物理仿真（需要碰撞和惯性）</li>
+  <li>MoveIt：碰撞检测与运动学</li>
+  <li>ros2_control：读取硬件接口声明（第 12 章）</li>
+</ul>
+
+<h2>8.2 Link 的三种属性</h2>
+<table>
+  <thead><tr><th>属性</th><th>作用</th><th>建议</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;visual&gt;</code></td><td>显示外观（RViz、Gazebo 画面）</td><td>可用精细的 mesh（STL / DAE）</td></tr>
+    <tr><td><code>&lt;collision&gt;</code></td><td>碰撞检测与物理接触</td><td>用简单几何体（box、cylinder、sphere），计算快</td></tr>
+    <tr><td><code>&lt;inertial&gt;</code></td><td>质量与惯性张量</td><td>仿真必须有且合理，否则模型乱飞</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="xml">
+<link name="base_link">
+  <visual>
+    <origin xyz="0 0 0.03" rpy="0 0 0"/>   <!-- 几何体相对 link 原点的偏移 -->
+    <geometry>
+      <box size="0.4 0.3 0.1"/>
+      <!-- 其他几何：<cylinder radius="0.05" length="0.04"/>  <sphere radius="0.025"/>
+           <mesh filename="package://my_bot_description/meshes/base.stl" scale="0.001 0.001 0.001"/> -->
+    </geometry>
+    <material name="blue"><color rgba="0.2 0.4 0.9 1"/></material>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0.03"/>
+    <geometry><box size="0.4 0.3 0.1"/></geometry>
+  </collision>
+  <inertial>
+    <origin xyz="0 0 0.03"/>
+    <mass value="2.0"/>
+    <inertia ixx="0.0167" ixy="0" ixz="0" iyy="0.0283" iyz="0" izz="0.0417"/>
+  </inertial>
+</link>
+</script>
+
+<h2>8.3 Joint 关节类型</h2>
+<table>
+  <thead><tr><th>类型</th><th>自由度</th><th>例子</th><th>需要 limit</th></tr></thead>
+  <tbody>
+    <tr><td><code>fixed</code></td><td>0</td><td>传感器安装、base_footprint</td><td>否</td></tr>
+    <tr><td><code>continuous</code></td><td>绕轴无限旋转</td><td>车轮</td><td>否</td></tr>
+    <tr><td><code>revolute</code></td><td>绕轴有限旋转</td><td>机械臂关节、舵机</td><td>是</td></tr>
+    <tr><td><code>prismatic</code></td><td>沿轴平移</td><td>升降台、直线导轨、夹爪手指</td><td>是</td></tr>
+    <tr><td><code>floating</code></td><td>6</td><td>很少使用</td><td>否</td></tr>
+    <tr><td><code>planar</code></td><td>平面内 3</td><td>很少使用</td><td>否</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="xml">
+<joint name="arm_joint" type="revolute">
+  <parent link="base_link"/>
+  <child link="arm_link"/>
+  <origin xyz="0 0 0.1" rpy="0 0 0"/>     <!-- child 坐标系相对 parent 的位姿 -->
+  <axis xyz="0 0 1"/>                      <!-- 在 child 坐标系中表达的旋转轴 -->
+  <limit lower="-1.57" upper="1.57" effort="10.0" velocity="1.0"/>
+  <dynamics damping="0.1" friction="0.0"/>
+</joint>
+</script>
+<div class="callout note">
+  <strong>两个 origin 别混淆</strong>
+  <p><code>joint</code> 的 <code>origin</code> 决定子 link <strong>坐标系</strong>放在哪里；<code>link</code> 内 <code>visual</code> 的 <code>origin</code> 决定几何体相对自身坐标系的偏移。先放坐标系，再放形状。</p>
+</div>
+
+<h2>8.4 Xacro：让 URDF 可维护</h2>
+<p>纯 URDF 里两个轮子要写两遍几乎相同的代码，改个轮径要改十几处。Xacro（XML Macros）提供：</p>
+<ul>
+  <li><code>&lt;xacro:property&gt;</code>：定义常量</li>
+  <li><code>${...}</code>：数学表达式，如 <code>${wheel_radius * 2}</code>、<code>${pi/2}</code></li>
+  <li><code>&lt;xacro:macro&gt;</code>：可复用的模板</li>
+  <li><code>&lt;xacro:include&gt;</code>：拆分文件</li>
+  <li><code>&lt;xacro:arg&gt;</code> 与 <code>$(arg ...)</code>：从外部传参</li>
+  <li><code>&lt;xacro:if value="..."&gt;</code>：条件</li>
+</ul>
+
+<h2>8.5 实战：差速小车模型</h2>
+<h3>创建包</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-xacro ros-jazzy-joint-state-publisher-gui liburdfdom-tools
+cd ~/ros2_ws/src
+ros2 pkg create my_bot_description --build-type ament_cmake --license Apache-2.0
+cd my_bot_description && mkdir -p urdf launch rviz meshes
+</script>
+<h3>惯性宏</h3>
+<p>常见几何体的惯性张量公式（质量 m，均匀密度）：长方体 <code>ixx = m(y²+z²)/12</code>；圆柱（轴沿 z）<code>ixx = iyy = m(3r²+h²)/12</code>，<code>izz = mr²/2</code>；球 <code>i = 2mr²/5</code>。</p>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_description/urdf/inertial_macros.xacro">
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="inertial_box" params="mass x y z *origin">
+    <inertial>
+      <xacro:insert_block name="origin"/>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass * (y*y + z*z) / 12}" ixy="0" ixz="0"
+               iyy="${mass * (x*x + z*z) / 12}" iyz="0"
+               izz="${mass * (x*x + y*y) / 12}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="inertial_cylinder" params="mass radius length *origin">
+    <inertial>
+      <xacro:insert_block name="origin"/>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass * (3*radius*radius + length*length) / 12}" ixy="0" ixz="0"
+               iyy="${mass * (3*radius*radius + length*length) / 12}" iyz="0"
+               izz="${mass * radius * radius / 2}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="inertial_sphere" params="mass radius *origin">
+    <inertial>
+      <xacro:insert_block name="origin"/>
+      <mass value="${mass}"/>
+      <inertia ixx="${2 * mass * radius * radius / 5}" ixy="0" ixz="0"
+               iyy="${2 * mass * radius * radius / 5}" iyz="0"
+               izz="${2 * mass * radius * radius / 5}"/>
+    </inertial>
+  </xacro:macro>
+
+</robot>
+</script>
+<h3>主模型</h3>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_bot_description/urdf/my_bot.urdf.xacro">
+<?xml version="1.0"?>
+<robot name="my_bot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:include filename="inertial_macros.xacro"/>
+
+  <!-- ========== 尺寸参数（单位：米、千克） ========== -->
+  <xacro:property name="chassis_x" value="0.40"/>
+  <xacro:property name="chassis_y" value="0.30"/>
+  <xacro:property name="chassis_z" value="0.10"/>
+  <xacro:property name="chassis_mass" value="2.0"/>
+  <xacro:property name="wheel_radius" value="0.05"/>
+  <xacro:property name="wheel_width" value="0.04"/>
+  <xacro:property name="wheel_mass" value="0.2"/>
+  <xacro:property name="wheel_separation" value="0.35"/>   <!-- 两轮中心距 -->
+  <xacro:property name="caster_radius" value="0.025"/>
+
+  <material name="blue"><color rgba="0.2 0.4 0.9 1"/></material>
+  <material name="black"><color rgba="0.1 0.1 0.1 1"/></material>
+  <material name="grey"><color rgba="0.6 0.6 0.6 1"/></material>
+
+  <!-- ========== 底盘 ========== -->
+  <link name="base_footprint"/>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${wheel_radius}"/>      <!-- base_link 位于轮轴高度 -->
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${chassis_z/2 - 0.02}"/>
+      <geometry><box size="${chassis_x} ${chassis_y} ${chassis_z}"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${chassis_z/2 - 0.02}"/>
+      <geometry><box size="${chassis_x} ${chassis_y} ${chassis_z}"/></geometry>
+    </collision>
+    <xacro:inertial_box mass="${chassis_mass}" x="${chassis_x}" y="${chassis_y}" z="${chassis_z}">
+      <origin xyz="0 0 ${chassis_z/2 - 0.02}"/>
+    </xacro:inertial_box>
+  </link>
+
+  <!-- ========== 车轮宏 ========== -->
+  <xacro:macro name="wheel" params="prefix y_reflect">
+    <link name="${prefix}_wheel_link">
+      <visual>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <xacro:inertial_cylinder mass="${wheel_mass}" radius="${wheel_radius}" length="${wheel_width}">
+        <origin xyz="0 0 0"/>
+      </xacro:inertial_cylinder>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <!-- 绕 x 轴转 -90°，让圆柱的 z 轴指向机器人左侧（+y） -->
+      <origin xyz="0 ${y_reflect * wheel_separation / 2} 0" rpy="${-pi/2} 0 0"/>
+      <axis xyz="0 0 1"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel prefix="left" y_reflect="1"/>
+  <xacro:wheel prefix="right" y_reflect="-1"/>
+
+  <!-- ========== 万向轮（用无摩擦球体模拟） ========== -->
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_link"/>
+    <origin xyz="${chassis_x/2 - 0.05} 0 ${caster_radius - wheel_radius}"/>
+  </joint>
+
+  <link name="caster_link">
+    <visual>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+    </collision>
+    <xacro:inertial_sphere mass="0.05" radius="${caster_radius}">
+      <origin xyz="0 0 0"/>
+    </xacro:inertial_sphere>
+  </link>
+
+  <!-- ========== 激光雷达 ========== -->
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_link"/>
+    <origin xyz="0.10 0 ${chassis_z + 0.02}"/>
+  </joint>
+
+  <link name="laser_link">
+    <visual>
+      <geometry><cylinder radius="0.04" length="0.04"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="0.04" length="0.04"/></geometry>
+    </collision>
+    <xacro:inertial_cylinder mass="0.1" radius="0.04" length="0.04">
+      <origin xyz="0 0 0"/>
+    </xacro:inertial_cylinder>
+  </link>
+
+</robot>
+</script>
+
+<h3>显示用的 launch 文件</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_description/launch/display.launch.py">
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition, UnlessCondition
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    pkg = FindPackageShare('my_bot_description')
+    xacro_file = PathJoinSubstitution([pkg, 'urdf', 'my_bot.urdf.xacro'])
+    rviz_config = PathJoinSubstitution([pkg, 'rviz', 'display.rviz'])
+
+    # 运行 xacro 生成 URDF 字符串；必须用 ParameterValue 声明为字符串
+    robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
+    gui = LaunchConfiguration('gui')
+
+    return LaunchDescription([
+        DeclareLaunchArgument('gui', default_value='true',
+                              description='是否使用滑块控制关节'),
+
+        Node(package='robot_state_publisher', executable='robot_state_publisher',
+             parameters=[{'robot_description': robot_description}]),
+
+        Node(package='joint_state_publisher_gui', executable='joint_state_publisher_gui',
+             condition=IfCondition(gui)),
+        Node(package='joint_state_publisher', executable='joint_state_publisher',
+             condition=UnlessCondition(gui)),
+
+        Node(package='rviz2', executable='rviz2', arguments=['-d', rviz_config]),
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="my_bot_description/CMakeLists.txt（ament_package() 之前加入）">
+install(DIRECTORY urdf launch rviz meshes
+  DESTINATION share/${PROJECT_NAME})
+</script>
+<p>在 <code>package.xml</code> 中添加运行依赖：</p>
+<script type="text/plain" class="code" data-lang="xml">
+<exec_depend>xacro</exec_depend>
+<exec_depend>robot_state_publisher</exec_depend>
+<exec_depend>joint_state_publisher</exec_depend>
+<exec_depend>joint_state_publisher_gui</exec_depend>
+<exec_depend>rviz2</exec_depend>
+</script>
+<h3>运行</h3>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws && colcon build --packages-select my_bot_description && source install/setup.bash
+ros2 launch my_bot_description display.launch.py
+</script>
+<p>第一次运行时 <code>rviz/display.rviz</code> 还不存在，RViz 会以默认配置打开。按以下步骤配置后，用 File → Save Config As 保存到 <code>~/ros2_ws/src/my_bot_description/rviz/display.rviz</code>：</p>
+<ol>
+  <li>Global Options → Fixed Frame 设为 <code>base_footprint</code></li>
+  <li>Add → RobotModel，Description Topic 选 <code>/robot_description</code></li>
+  <li>Add → TF，勾选 Show Names</li>
+  <li>拖动 joint_state_publisher_gui 的滑块，可以看到车轮转动</li>
+</ol>
+<div class="callout note">
+  <strong>数据流</strong>
+  <p><code>joint_state_publisher</code> 发布 <code>/joint_states</code>（可动关节的角度）→ <code>robot_state_publisher</code> 结合 URDF 计算每个 link 的位姿 → 发布到 <code>/tf</code>（可动关节）与 <code>/tf_static</code>（固定关节）。真实机器人或仿真中，<code>/joint_states</code> 由驱动或 Gazebo 提供，就不需要 joint_state_publisher 了。</p>
+</div>
+
+<h2>8.6 检查与调试</h2>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src/my_bot_description/urdf
+xacro my_bot.urdf.xacro > /tmp/my_bot.urdf      # 展开 xacro，查看最终 URDF
+check_urdf /tmp/my_bot.urdf                     # 检查语法与树结构
+urdf_to_graphviz /tmp/my_bot.urdf               # 生成结构图 PDF
+
+ros2 param get /robot_state_publisher robot_description | head
+</script>
+<table>
+  <thead><tr><th>现象</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>RViz 中 RobotModel 报 “No transform from [xxx]”</td><td>可动关节没有 <code>/joint_states</code>，忘了启动 joint_state_publisher</td></tr>
+    <tr><td>轮子横躺 / 竖立方向不对</td><td>圆柱默认沿 z 轴，需要用 joint 或 visual 的 rpy 旋转</td></tr>
+    <tr><td>launch 报 “Unable to parse the value of parameter robot_description as yaml”</td><td>没用 <code>ParameterValue(..., value_type=str)</code> 包裹</td></tr>
+    <tr><td>mesh 不显示</td><td>路径应写 <code>package://包名/meshes/xx.stl</code>，且 meshes 目录要安装；STL 单位是毫米时需 <code>scale="0.001 0.001 0.001"</code></td></tr>
+    <tr><td>Gazebo 中模型抖动、飞走</td><td>惯性不合理（质量为 0、惯性张量太小）或碰撞体互相穿插</td></tr>
+  </tbody>
+</table>
+
+<h2>8.7 从 CAD 导出</h2>
+<p>复杂机器人通常从 CAD 导出 URDF：SolidWorks 有 <code>sw_urdf_exporter</code> 插件，Onshape 可用 <code>onshape-to-robot</code>，Fusion 360 有社区导出脚本。导出后仍建议手动检查坐标系方向（REP-103）、简化碰撞体、核对质量。</p>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 为什么要单独有一个 <code>base_footprint</code>？</summary>
+<div>它是机器人在地面上的投影（z=0），2D 导航只关心平面位姿，用 base_footprint 作为机器人基准可以避免 base_link 高度带来的偏差。base_link 通常位于本体中心或轮轴高度。</div></details>
+<details class="quiz"><summary>2. collision 可以直接复制 visual 中精细的 mesh 吗？</summary>
+<div>可以，但不推荐。精细 mesh 的碰撞检测计算量大，会拖慢仿真和 MoveIt 规划。应使用简化的基本几何体或简化后的凸包 mesh。</div></details>
+<details class="quiz"><summary>3. 把轮距从 0.35 改为 0.40，需要改几处？</summary>
+<div>只需改 <code>wheel_separation</code> 属性一处，两个车轮的位置都通过表达式 <code>${y_reflect * wheel_separation / 2}</code> 计算。这就是 Xacro 的价值。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能解释 visual / collision / inertial 的区别</li>
+  <li>能说出 fixed、continuous、revolute、prismatic 的使用场景</li>
+  <li>my_bot 在 RViz 中显示正确，车轮随滑块转动</li>
+  <li>会用 <code>check_urdf</code> 检查模型</li>
+  <li>理解 joint_state_publisher → robot_state_publisher → TF 的数据流</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

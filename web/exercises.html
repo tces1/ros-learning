@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动手练习（含参考答案） · ROS2 中文教材</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="ex" data-root="">
+<main class="content">
+
+<h1>动手练习（含参考答案）</h1>
+<p class="lead">6 套练习对应 6 周学习路线。请先独立完成，卡住超过 30 分钟再展开参考答案。每套练习都有明确的验收标准。</p>
+
+<h2>练习 1：第一个节点（第 1–3 章）</h2>
+<h3>任务</h3>
+<ol>
+  <li>创建 Python 包 <code>ex_basics</code>。</li>
+  <li>编写节点 <code>counter</code>：每 0.5 秒在话题 <code>count</code> 上发布一个递增整数（<code>std_msgs/msg/Int32</code>）。</li>
+  <li>编写节点 <code>even_filter</code>：订阅 <code>count</code>，只把偶数转发到话题 <code>even</code>。</li>
+  <li>用 <code>ros2 topic echo /even</code> 验证，用 <code>rqt_graph</code> 截图。</li>
+</ol>
+<p><strong>验收</strong>：<code>ros2 topic hz /even</code> 约为 1 Hz；数值全为偶数。</p>
+<details class="quiz"><summary>参考答案</summary>
+<script type="text/plain" class="code" data-lang="python" data-file="ex_basics/ex_basics/counter.py">
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32
+
+
+class Counter(Node):
+    def __init__(self):
+        super().__init__('counter')
+        self.pub = self.create_publisher(Int32, 'count', 10)
+        self.n = 0
+        self.create_timer(0.5, self.tick)
+
+    def tick(self):
+        self.pub.publish(Int32(data=self.n))
+        self.n += 1
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(Counter())
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="ex_basics/ex_basics/even_filter.py">
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32
+
+
+class EvenFilter(Node):
+    def __init__(self):
+        super().__init__('even_filter')
+        self.pub = self.create_publisher(Int32, 'even', 10)
+        self.create_subscription(Int32, 'count', self.on_count, 10)
+
+    def on_count(self, msg):
+        if msg.data % 2 == 0:
+            self.pub.publish(msg)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(EvenFilter())
+</script>
+<p>别忘了在 <code>setup.py</code> 中注册 <code>counter</code> 和 <code>even_filter</code> 两个入口。</p>
+</details>
+
+<h2>练习 2：QoS 实验（第 4 章）</h2>
+<h3>任务</h3>
+<ol>
+  <li>节点 A 以 <code>BEST_EFFORT</code> 发布 <code>/qos_test</code>（Int32，10 Hz）。</li>
+  <li>节点 B 分别以 <code>RELIABLE</code> 和 <code>BEST_EFFORT</code> 订阅，记录各自是否收到数据。</li>
+  <li>用 <code>ros2 topic info /qos_test -v</code> 解释现象。</li>
+  <li>再做一组：发布者 <code>TRANSIENT_LOCAL</code>（depth=1）发布一条消息后停止发布，5 秒后启动 <code>VOLATILE</code> 和 <code>TRANSIENT_LOCAL</code> 两种订阅者，比较结果。</li>
+</ol>
+<details class="quiz"><summary>参考答案与现象说明</summary>
+<ul>
+  <li>BEST_EFFORT 发布 + RELIABLE 订阅：<strong>收不到</strong>（订阅者要求高于发布者承诺，不兼容）。</li>
+  <li>BEST_EFFORT 发布 + BEST_EFFORT 订阅：正常收到。</li>
+  <li>TRANSIENT_LOCAL 发布 + 晚启动的 TRANSIENT_LOCAL 订阅：收到最后一条历史消息。</li>
+  <li>TRANSIENT_LOCAL 发布 + 晚启动的 VOLATILE 订阅：能连接，但收不到历史消息。</li>
+</ul>
+<script type="text/plain" class="code" data-lang="python">
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
+be = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                     durability=DurabilityPolicy.TRANSIENT_LOCAL)
+</script>
+<p>思考题答案：高速相机图像应选 BEST_EFFORT——丢一帧影响不大，而 RELIABLE 的重传会造成延迟累积，看到的永远是「过去」的画面。</p>
+</details>
+
+<h2>练习 3：服务 + 参数 + Launch（第 5–6 章）</h2>
+<h3>任务</h3>
+<ol>
+  <li>在练习 1 的 <code>counter</code> 中增加参数 <code>step</code>（默认 1）与服务 <code>reset</code>（<code>std_srvs/srv/Trigger</code>），调用后计数归零。</li>
+  <li>编写 launch：启动 <code>counter</code>（<code>step</code> 由 launch 参数传入）和 <code>even_filter</code>，并把 <code>even</code> 重映射为 <code>/numbers/even</code>。</li>
+  <li>用 <code>GroupAction</code> + <code>PushRosNamespace</code> 同时启动两套，命名空间分别为 <code>a</code>、<code>b</code>。</li>
+</ol>
+<p><strong>验收</strong>：<code>ros2 launch ex_basics counters.launch.py step:=2</code> 后，<code>/a/count</code> 与 <code>/b/count</code> 每次加 2；<code>ros2 service call /a/reset std_srvs/srv/Trigger</code> 只重置 a。</p>
+<details class="quiz"><summary>参考答案</summary>
+<script type="text/plain" class="code" data-lang="python" data-file="counter.py 的修改部分">
+from std_srvs.srv import Trigger
+
+# __init__ 中
+self.declare_parameter('step', 1)
+self.create_service(Trigger, 'reset', self.on_reset)
+
+def tick(self):
+    self.pub.publish(Int32(data=self.n))
+    self.n += self.get_parameter('step').value
+
+def on_reset(self, request, response):
+    self.n = 0
+    response.success = True
+    response.message = 'counter reset'
+    return response
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="ex_basics/launch/counters.launch.py">
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+    step = ParameterValue(LaunchConfiguration('step'), value_type=int)
+    groups = []
+    for ns in ['a', 'b']:
+        groups.append(GroupAction([
+            PushRosNamespace(ns),
+            Node(package='ex_basics', executable='counter', parameters=[{'step': step}]),
+            Node(package='ex_basics', executable='even_filter',
+                 remappings=[('even', 'numbers/even')]),
+        ]))
+    return LaunchDescription([DeclareLaunchArgument('step', default_value='1')] + groups)
+</script>
+<p>注意：重映射目标写成相对名 <code>numbers/even</code>，才会变成 <code>/a/numbers/even</code>；写成 <code>/numbers/even</code> 会让两组发布到同一个话题。题目中的 <code>/numbers/even</code> 是故意的陷阱，可以都试一下并观察区别。<code>ParameterValue(..., value_type=int)</code> 确保参数类型是整数而不是字符串。</p>
+</details>
+
+<h2>练习 4：TF 与 URDF（第 7–8 章）</h2>
+<h3>任务</h3>
+<ol>
+  <li>为第 8 章的 my_bot 添加一个相机：<code>camera_link</code> 位于 base_link 前方 0.18 m、上方 0.10 m，并向下俯 15°；再添加符合光学约定的 <code>camera_optical_frame</code>。</li>
+  <li>编写节点：每秒打印 <code>camera_optical_frame</code> 中 (0, 0, 1) 这个点在 <code>base_footprint</code> 中的坐标。</li>
+</ol>
+<p><strong>验收</strong>：打印结果 x ≈ 1.15、z 明显小于相机高度（因为相机俯视）。</p>
+<details class="quiz"><summary>参考答案</summary>
+<script type="text/plain" class="code" data-lang="xml">
+<joint name="camera_joint" type="fixed">
+  <parent link="base_link"/>
+  <child link="camera_link"/>
+  <origin xyz="0.18 0 0.10" rpy="0 ${15 * pi / 180} 0"/>   <!-- 绕 y 正转 = 低头 -->
+</joint>
+<link name="camera_link">
+  <visual><geometry><box size="0.03 0.08 0.03"/></geometry></visual>
+</link>
+
+<!-- 光学坐标系：z 前、x 右、y 下 -->
+<joint name="camera_optical_joint" type="fixed">
+  <parent link="camera_link"/>
+  <child link="camera_optical_frame"/>
+  <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+</joint>
+<link name="camera_optical_frame"/>
+</script>
+<script type="text/plain" class="code" data-lang="python">
+pt = PointStamped()
+pt.header.frame_id = 'camera_optical_frame'
+pt.point.z = 1.0                                   # 光轴正前方 1 m
+out = self.buffer.transform(pt, 'base_footprint', timeout=Duration(seconds=0.2))
+self.get_logger().info(f'({out.point.x:.3f}, {out.point.y:.3f}, {out.point.z:.3f})')
+</script>
+<p>计算验证：光轴向下倾斜 15°，前进 1 m 对应水平 cos15° ≈ 0.966、下降 sin15° ≈ 0.259。相机在 base_footprint 中位于 (0.18, 0, 0.05+0.10=0.15)，因此结果约为 (1.146, 0, −0.109)。z 为负说明这条视线 1 m 处已低于地面。</p>
+</details>
+
+<h2>练习 5：仿真与录包（第 9–11 章）</h2>
+<h3>任务</h3>
+<ol>
+  <li>启动第 9 章的仿真，录制 60 秒包含 <code>/scan /odom /tf /tf_static /clock</code> 的 bag。</li>
+  <li>关闭仿真，回放 bag，在 RViz 中显示激光与里程计（Fixed Frame = odom）。</li>
+  <li>写一个 Python 脚本读取 bag，计算小车行驶的总里程（由 <code>/odom</code> 位置累加）。</li>
+</ol>
+<details class="quiz"><summary>参考答案</summary>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag record -o lab5 /scan /odom /tf /tf_static /clock    # 录制时 /clock 来自仿真
+# bag 中已包含 /clock，回放时不要再加 --clock，否则会出现两个时钟源：
+ros2 bag play lab5
+ros2 run rviz2 rviz2 --ros-args -p use_sim_time:=true
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="odom_distance.py">
+import math
+
+import rosbag2_py
+from nav_msgs.msg import Odometry
+from rclpy.serialization import deserialize_message
+
+reader = rosbag2_py.SequentialReader()
+reader.open(rosbag2_py.StorageOptions(uri='lab5', storage_id='mcap'),
+            rosbag2_py.ConverterOptions('', ''))
+reader.set_filter(rosbag2_py.StorageFilter(topics=['/odom']))
+
+total, last = 0.0, None
+while reader.has_next():
+    _, data, _ = reader.read_next()
+    p = deserialize_message(data, Odometry).pose.pose.position
+    if last is not None:
+        total += math.hypot(p.x - last[0], p.y - last[1])
+    last = (p.x, p.y)
+print(f'总里程 {total:.2f} m')
+</script>
+</details>
+
+<h2>练习 6：导航应用（第 13、15 章）</h2>
+<h3>任务</h3>
+<ol>
+  <li>在 room 地图上，编写程序：机器人依次访问 3 个点，每到一个点原地旋转一圈（模拟「巡视」）。</li>
+  <li>在第 15 章 safety_stop 基础上，改为「前方 0.6 m 内有障碍时把速度按距离线性减小，0.3 m 内停止」。</li>
+</ol>
+<details class="quiz"><summary>参考答案</summary>
+<script type="text/plain" class="code" data-lang="python">
+# 1. 到达每个点后旋转：BasicNavigator.spin(spin_dist) 调用 Behavior Server 的 Spin
+for pose in waypoints:
+    nav.goToPose(pose)
+    while not nav.isTaskComplete():
+        pass
+    if nav.getResult() != TaskResult.SUCCEEDED:
+        break
+    nav.spin(spin_dist=6.28)
+    while not nav.isTaskComplete():
+        pass
+</script>
+<script type="text/plain" class="code" data-lang="python">
+# 2. 线性减速
+slow_d, stop_d = 0.6, 0.3
+if cmd.linear.x > 0.0:
+    if self.min_front <= stop_d:
+        scale = 0.0
+    elif self.min_front < slow_d:
+        scale = (self.min_front - stop_d) / (slow_d - stop_d)
+    else:
+        scale = 1.0
+    cmd.linear.x *= scale
+</script>
+</details>
+
+<h2>挑战题</h2>
+<ul class="checklist">
+  <li>用 C++ 重写练习 1，并把两个节点做成组件放进同一个容器</li>
+  <li>写一个生命周期节点：configure 时打开文件，activate 时开始写入收到的 <code>/scan</code> 最小距离，deactivate 时暂停</li>
+  <li>为 my_bot 添加 IMU，并用 robot_localization 的 EKF 融合轮速里程计与 IMU，比较融合前后的里程计漂移</li>
+  <li>把 Nav2 控制器从 RPP 换成 MPPI，对比同一路线的通行时间与平滑度</li>
+</ul>
+
+</main>
+<script src="assets/app.js"></script>
+</body>
+</html>

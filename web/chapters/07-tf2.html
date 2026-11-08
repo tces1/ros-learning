@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 7 章 TF2 坐标变换 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch07" data-root="../">
+<main class="content">
+
+<h1>第 7 章　TF2 坐标变换</h1>
+<p class="lead">机器人身上每个传感器、每个关节都有自己的坐标系。TF2 负责维护它们之间随时间变化的关系，让你能把任意数据从一个坐标系换算到另一个坐标系。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">导航与机械臂的基础</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>理解坐标系、变换、TF 树的概念</li>
+  <li>熟记 REP-103 / REP-105 的坐标约定：<code>map</code>、<code>odom</code>、<code>base_link</code></li>
+  <li>理解欧拉角与四元数，会互相转换</li>
+  <li>会用代码发布静态 / 动态变换，并查询变换、变换点和位姿</li>
+  <li>能用工具诊断 TF 问题</li>
+</ul>
+
+<h2>7.1 为什么需要 TF</h2>
+<p>激光雷达检测到前方 2 米处有障碍物，这个「2 米」是相对激光雷达本身的。要回答「障碍物在地图上的哪里」，需要依次知道：</p>
+<pre class="diagram">
+   障碍物在 laser_link 中的坐标 (2.0, 0, 0)
+        │  laser_link 相对 base_link：前方 0.15 m、高 0.2 m（固定安装）
+        ▼
+   障碍物在 base_link 中的坐标 (2.15, 0, 0.2)
+        │  base_link 相对 odom：由轮式里程计实时计算
+        ▼
+   障碍物在 odom 中的坐标
+        │  odom 相对 map：由定位算法（AMCL / SLAM）修正
+        ▼
+   障碍物在 map 中的坐标  ← 规划器需要的
+</pre>
+<p>TF2 把这些变换组织成一棵树，并且带时间戳缓存（默认 10 秒），你只需要问「t 时刻 A 坐标系中的点在 B 坐标系中是多少」。</p>
+
+<h2>7.2 坐标约定</h2>
+<h3>REP-103：轴向与单位</h3>
+<table>
+  <thead><tr><th>对象</th><th>约定</th></tr></thead>
+  <tbody>
+    <tr><td>机器人本体</td><td>x 向前，y 向左，z 向上（右手系）</td></tr>
+    <tr><td>相机光学坐标系（<code>*_optical_frame</code>）</td><td>z 向前（光轴），x 向右，y 向下</td></tr>
+    <tr><td>旋转正方向</td><td>右手定则：逆时针为正（从轴的正方向往回看）</td></tr>
+    <tr><td>单位</td><td>米、弧度</td></tr>
+  </tbody>
+</table>
+<h3>REP-105：移动机器人的标准坐标系</h3>
+<pre class="diagram">
+  map ──► odom ──► base_footprint ──► base_link ──┬──► laser_link
+   │        │                                     ├──► imu_link
+   │        │                                     ├──► camera_link ──► camera_optical_frame
+   │        │                                     ├──► left_wheel_link
+   │        │                                     └──► right_wheel_link
+   │        └─ 由里程计 / EKF 发布：连续平滑，但会随时间漂移
+   └─ 由定位算法发布：修正漂移，可能发生跳变
+</pre>
+<table>
+  <thead><tr><th>坐标系</th><th>含义</th><th>谁发布到它的变换</th><th>特点</th></tr></thead>
+  <tbody>
+    <tr><td><code>map</code></td><td>世界固定坐标系</td><td>—（树根）</td><td>长期准确，可能跳变</td></tr>
+    <tr><td><code>odom</code></td><td>里程计坐标系</td><td>定位节点发布 map→odom</td><td>短期准确连续，长期漂移</td></tr>
+    <tr><td><code>base_footprint</code></td><td>机器人在地面上的投影</td><td>里程计 / EKF 发布 odom→base_footprint</td><td>z=0，2D 导航常用</td></tr>
+    <tr><td><code>base_link</code></td><td>机器人本体中心</td><td><code>robot_state_publisher</code>（URDF 固定关节）</td><td>刚性连接于本体</td></tr>
+    <tr><td>传感器坐标系</td><td>激光、相机、IMU</td><td><code>robot_state_publisher</code></td><td>来自 URDF 的安装位置</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>为什么不直接发布 map→base_link？</strong>
+  <p>TF 树要求每个坐标系只能有一个父节点。定位算法输出 map→base_link 的位姿，但它会把 <em>它算出的</em> map→base_link 减去当前的 odom→base_link，得到 map→odom 再发布。这样里程计保持连续（局部控制器平滑），定位修正以「整体平移 odom」的方式体现。</p>
+</div>
+
+<h2>7.3 姿态表示：欧拉角与四元数</h2>
+<p>ROS 消息中姿态统一用<strong>四元数</strong> <code>(x, y, z, w)</code> 表示，因为它没有万向节锁、插值平滑、计算高效。但人更容易理解欧拉角（roll 绕 x、pitch 绕 y、yaw 绕 z）。</p>
+<table>
+  <thead><tr><th>描述</th><th>欧拉角 (roll, pitch, yaw)</th><th>四元数 (x, y, z, w)</th></tr></thead>
+  <tbody>
+    <tr><td>无旋转</td><td>(0, 0, 0)</td><td>(0, 0, 0, 1)</td></tr>
+    <tr><td>原地左转 90°</td><td>(0, 0, π/2)</td><td>(0, 0, 0.7071, 0.7071)</td></tr>
+    <tr><td>掉头 180°</td><td>(0, 0, π)</td><td>(0, 0, 1, 0)</td></tr>
+    <tr><td>右转 90°</td><td>(0, 0, −π/2)</td><td>(0, 0, −0.7071, 0.7071)</td></tr>
+  </tbody>
+</table>
+<div class="callout danger">
+  <strong>四元数必须归一化</strong>
+  <p>全 0 的四元数 <code>(0, 0, 0, 0)</code> 是非法的——这是新手手写 Pose 时最常见的错误，会让 TF / Nav2 报错或行为异常。不旋转时一定要写 <code>w = 1.0</code>。</p>
+</div>
+<script type="text/plain" class="code" data-lang="python" data-file="不依赖额外库的转换函数">
+import math
+
+
+def quaternion_from_euler(roll, pitch, yaw):
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (
+        sr * cp * cy - cr * sp * sy,   # x
+        cr * sp * cy + sr * cp * sy,   # y
+        cr * cp * sy - sr * sp * cy,   # z
+        cr * cp * cy + sr * sp * sy,   # w
+    )
+
+
+def yaw_from_quaternion(x, y, z, w):
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+</script>
+<p>C++ 中使用 tf2 自带的工具：</p>
+<script type="text/plain" class="code" data-lang="cpp">
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+
+tf2::Quaternion q;
+q.setRPY(0.0, 0.0, M_PI / 2);
+geometry_msgs::msg::Quaternion msg_q = tf2::toMsg(q);
+
+double roll, pitch, yaw;
+tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+</script>
+
+<h2>7.4 静态变换</h2>
+<p>传感器固定在车身上，相对位置不变，用静态变换发布一次即可（发布到 <code>/tf_static</code>，使用 TRANSIENT_LOCAL QoS）。</p>
+<h3>命令行</h3>
+<script type="text/plain" class="code" data-lang="bash">
+# 激光雷达在 base_link 前方 0.15 m、上方 0.2 m，无旋转
+ros2 run tf2_ros static_transform_publisher \
+  --x 0.15 --y 0 --z 0.2 --roll 0 --pitch 0 --yaw 0 \
+  --frame-id base_link --child-frame-id laser_link
+</script>
+<h3>Python 代码</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/static_tf.py">
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import TransformStamped
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+
+
+class StaticTf(Node):
+    def __init__(self):
+        super().__init__('static_tf')
+        self.broadcaster = StaticTransformBroadcaster(self)
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = 'base_link'          # 父坐标系
+        t.child_frame_id = 'laser_link'          # 子坐标系
+        t.transform.translation.x = 0.15
+        t.transform.translation.z = 0.2
+        t.transform.rotation.w = 1.0             # 无旋转
+        self.broadcaster.sendTransform(t)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(StaticTf())
+</script>
+<div class="callout tip">
+  <strong>实际项目中</strong>
+  <p>静态变换通常不手写，而是在 URDF 中用 <code>fixed</code> 关节描述，由 <code>robot_state_publisher</code> 统一发布（第 8 章）。</p>
+</div>
+
+<h2>7.5 动态变换</h2>
+<p>随时间变化的变换（如 odom→base_link）需要持续发布到 <code>/tf</code>。下面的节点模拟一个绕圈行驶的机器人：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/fake_odom.py">
+import math
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformBroadcaster
+
+
+class FakeOdom(Node):
+    def __init__(self):
+        super().__init__('fake_odom')
+        self.br = TransformBroadcaster(self)
+        self.x = self.y = self.yaw = 0.0
+        self.v, self.w = 0.5, 0.3          # 线速度 m/s，角速度 rad/s
+        self.dt = 0.02
+        self.create_timer(self.dt, self.step)
+
+    def step(self):
+        self.x += self.v * math.cos(self.yaw) * self.dt
+        self.y += self.v * math.sin(self.yaw) * self.dt
+        self.yaw += self.w * self.dt
+
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = 'odom'
+        t.child_frame_id = 'base_link'
+        t.transform.translation.x = self.x
+        t.transform.translation.y = self.y
+        t.transform.rotation.z = math.sin(self.yaw / 2)
+        t.transform.rotation.w = math.cos(self.yaw / 2)
+        self.br.sendTransform(t)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(FakeOdom())
+</script>
+
+<h2>7.6 查询变换（监听）</h2>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/tf_listener.py">
+import rclpy
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.time import Time
+from geometry_msgs.msg import PointStamped
+from tf2_ros import Buffer, TransformListener, TransformException
+import tf2_geometry_msgs  # noqa: F401  注册 PointStamped 等类型的 do_transform
+
+
+class TfQuery(Node):
+    def __init__(self):
+        super().__init__('tf_query')
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer, self)   # 必须保持引用
+        self.create_timer(1.0, self.on_timer)
+
+    def on_timer(self):
+        try:
+            # 1. 查询 odom 中 base_link 的位姿；Time() 表示「最新可用」
+            t = self.buffer.lookup_transform('odom', 'base_link', Time(),
+                                             timeout=Duration(seconds=0.1))
+            p = t.transform.translation
+            self.get_logger().info(f'机器人位于 odom: ({p.x:.2f}, {p.y:.2f})')
+
+            # 2. 把激光坐标系中的点变换到 odom
+            pt = PointStamped()
+            pt.header.frame_id = 'laser_link'
+            pt.header.stamp = Time().to_msg()
+            pt.point.x = 2.0
+            pt_odom = self.buffer.transform(pt, 'odom', timeout=Duration(seconds=0.1))
+            self.get_logger().info(f'障碍物在 odom: ({pt_odom.point.x:.2f}, {pt_odom.point.y:.2f})')
+        except TransformException as e:
+            self.get_logger().warn(f'TF 不可用: {e}')
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(TfQuery())
+</script>
+<p><code>lookup_transform(target, source, time)</code> 的参数顺序容易记反：返回的是<strong>把 source 中的数据变换到 target</strong> 所需的变换，也就是「source 坐标系在 target 中的位姿」。</p>
+<h3>C++ 版本要点</h3>
+<script type="text/plain" class="code" data-lang="cpp">
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+
+tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+try {
+  auto t = tf_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
+} catch (const tf2::TransformException & ex) {
+  RCLCPP_WARN(get_logger(), "%s", ex.what());
+}
+</script>
+
+<h2>7.7 时间与 TF</h2>
+<table>
+  <thead><tr><th>查询时间</th><th>含义</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr><td><code>Time()</code> / <code>TimePointZero</code></td><td>缓存中最新的变换</td><td>不严格要求时间对齐的场景</td></tr>
+    <tr><td><code>msg.header.stamp</code></td><td>数据采集时刻的变换</td><td><strong>处理传感器数据时应该用这个</strong></td></tr>
+  </tbody>
+</table>
+<p>常见错误信息：</p>
+<ul>
+  <li><strong>“Lookup would require extrapolation into the future”</strong>：请求的时刻比最新变换还新。通常是 TF 发布频率低、网络延迟，或某些节点用仿真时间而其他用系统时间。可加 <code>timeout</code> 等待。</li>
+  <li><strong>“extrapolation into the past”</strong>：请求的时刻早于缓存中最旧的数据（默认缓存 10 秒），或时间源不一致。</li>
+  <li><strong>“frame does not exist”</strong>：坐标系从未被发布，或名字拼错（注意不要以 <code>/</code> 开头，ROS2 中 frame_id 写作 <code>base_link</code> 而非 <code>/base_link</code>）。</li>
+  <li><strong>“not part of the same tree”</strong>：两个坐标系之间没有连通路径，TF 树断开了。</li>
+</ul>
+
+<h2>7.8 诊断工具</h2>
+<script type="text/plain" class="code" data-lang="bash">
+# 生成 TF 树 PDF（frames_时间戳.pdf），显示每个变换的发布者与频率
+ros2 run tf2_tools view_frames
+
+# 实时打印两个坐标系之间的变换
+ros2 run tf2_ros tf2_echo odom base_link
+
+# 监控 TF 延迟
+ros2 run tf2_ros tf2_monitor odom base_link
+
+# 原始话题
+ros2 topic echo /tf --once
+ros2 topic echo /tf_static --qos-durability transient_local --once
+</script>
+<p><strong>RViz2</strong>：添加 TF 显示，勾选 Show Names。Fixed Frame 选 <code>odom</code>，运行 7.5 的 fake_odom，可以看到 base_link 在绕圈。若某坐标系显示为红色警告，说明从它到 Fixed Frame 没有可用变换。</p>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 一个坐标系能有两个父坐标系吗？如果 AMCL 和 EKF 都发布 odom→base_link 会怎样？</summary>
+<div>不能，TF 必须是树。两个节点发布同一对坐标系的变换会导致数据交替跳变、定位抖动。正确做法：EKF 发布 odom→base_link，AMCL 发布 map→odom。</div></details>
+<details class="quiz"><summary>2. <code>lookup_transform('map', 'laser_link', t)</code> 返回的平移量表示什么？</summary>
+<div>laser_link 坐标系原点在 map 坐标系中的位置（以及其姿态）。用这个变换可以把 laser_link 中的数据转换到 map 中。</div></details>
+<details class="quiz"><summary>3. 机器人朝向 yaw = 90°，对应的四元数是多少？</summary>
+<div>(x, y, z, w) = (0, 0, sin(45°), cos(45°)) ≈ (0, 0, 0.7071, 0.7071)。</div></details>
+<details class="quiz"><summary>4. 相机图像中检测到的物体，为什么要变换到 base_link 时要用 <code>camera_optical_frame</code> 而不是 <code>camera_link</code>？</summary>
+<div>图像像素与深度计算出的 3D 坐标遵循光学约定（z 前、x 右、y 下），属于 optical frame；camera_link 遵循机器人约定（x 前、y 左、z 上）。两者之间有一个固定旋转，用错会导致坐标轴混乱。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能画出 map → odom → base_link → laser_link 的 TF 树并说明各自由谁发布</li>
+  <li>能手算 yaw 角对应的四元数</li>
+  <li>用命令行和代码分别发布过静态变换</li>
+  <li>fake_odom 在 RViz 中绕圈显示正确</li>
+  <li>会用 <code>buffer.transform</code> 把一个点从 laser_link 变换到 odom</li>
+  <li>能用 <code>view_frames</code> 和 <code>tf2_echo</code> 诊断问题</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROS2 中文教材 · 从零到移动机器人全栈</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="home" data-root="">
+<main class="content">
+
+<div class="hero">
+  <h1>ROS / ROS2 中文系统教材</h1>
+  <p class="lead">从零基础到能独立完成「仿真小车 + SLAM 建图 + 自主导航」的完整学习路线。以 ROS2 Jazzy 为主线，Humble 用户只需把发行版名替换即可；关键位置对照 ROS1 Noetic。</p>
+  <div class="meta-bar">
+    <span class="tag">16 章正文</span>
+    <span class="tag">6 套练习 + 参考答案</span>
+    <span class="tag">4 个附录</span>
+    <span class="tag">Python + C++ 双语示例</span>
+    <span class="tag">可离线阅读</span>
+  </div>
+</div>
+
+<h2>你的学习进度</h2>
+<p>每读完一章，点击页面底部的「标记本页为已完成」。进度保存在本机浏览器里。</p>
+<div class="progress-bar"><div id="progress-bar"></div></div>
+<p id="progress-text" style="color:var(--fg-soft);font-size:14px"></p>
+
+<h2>全部章节</h2>
+<div class="card-grid" id="chapter-cards"></div>
+
+<h2>推荐学习路线（6 周）</h2>
+<table>
+  <thead><tr><th>周次</th><th>章节</th><th>本周目标</th><th>可交付成果</th></tr></thead>
+  <tbody>
+    <tr><td>第 1 周</td><td>1–3 章</td><td>理解 ROS2 是什么，装好环境，写出第一个节点</td><td>能运行自己写的 talker / listener</td></tr>
+    <tr><td>第 2 周</td><td>4–6 章</td><td>掌握话题、服务、参数、动作、Launch</td><td>一个用 launch 启动的多节点小系统</td></tr>
+    <tr><td>第 3 周</td><td>7–9 章</td><td>坐标变换、机器人建模、Gazebo 仿真</td><td>在 Gazebo 中能用键盘开动的差速小车</td></tr>
+    <tr><td>第 4 周</td><td>10–12 章</td><td>工程化：构建、测试、调试、录包、ros2_control</td><td>带单元测试、可录包复现的功能包</td></tr>
+    <tr><td>第 5 周</td><td>13–15 章</td><td>导航、机械臂、感知</td><td>仿真里完成 SLAM 建图与点到点导航</td></tr>
+    <tr><td>第 6 周</td><td>16 章 + 练习</td><td>综合项目</td><td>多航点巡逻的小车 + 项目 README + 演示录包</td></tr>
+  </tbody>
+</table>
+
+<div class="callout tip">
+  <strong>每天 1.5 – 2 小时即可</strong>
+  <p>建议「读 30 分钟 + 敲代码 60 分钟 + 写笔记 15 分钟」。ROS 是工程技能，只读不敲几乎学不会。每章都有可直接复制的命令和代码，复制后请逐行读懂再运行。</p>
+</div>
+
+<h2>前置知识</h2>
+<table>
+  <thead><tr><th>知识</th><th>需要程度</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>Linux 命令行</td><td>必需</td><td>会 <code>cd</code>、<code>ls</code>、<code>source</code>、<code>apt</code>、编辑文件、理解环境变量</td></tr>
+    <tr><td>Python 3</td><td>必需</td><td>类、函数、模块导入、虚拟环境概念</td></tr>
+    <tr><td>C++</td><td>推荐</td><td>类、智能指针 <code>std::shared_ptr</code>、lambda、模板的基本用法；只学 Python 也能完成本教材 80% 内容</td></tr>
+    <tr><td>线性代数</td><td>推荐</td><td>向量、矩阵、旋转矩阵；第 7 章会补充四元数</td></tr>
+    <tr><td>Git</td><td>推荐</td><td>clone / commit / branch，用于管理你的工作空间</td></tr>
+  </tbody>
+</table>
+
+<h2>环境选择</h2>
+<table>
+  <thead><tr><th>你的电脑</th><th>推荐方案</th><th>评价</th></tr></thead>
+  <tbody>
+    <tr><td>Windows 10/11</td><td>WSL2 + Ubuntu 24.04 + ROS2 Jazzy</td><td>本教材默认方案。WSLg 自带图形界面，RViz、Gazebo 都能直接运行</td></tr>
+    <tr><td>Windows（显卡/仿真要求高）</td><td>双系统安装 Ubuntu 24.04</td><td>性能最好，Gazebo 最流畅</td></tr>
+    <tr><td>Ubuntu 22.04</td><td>ROS2 Humble</td><td>完全可用，命令中把 <code>jazzy</code> 换成 <code>humble</code>；仿真章节需使用 Gazebo Fortress</td></tr>
+    <tr><td>macOS</td><td>虚拟机（UTM / Parallels）装 Ubuntu，或 Docker</td><td>原生编译麻烦，不推荐</td></tr>
+  </tbody>
+</table>
+
+<h2>本教材的约定</h2>
+<ul>
+  <li>命令前没有提示符，直接复制到终端运行；需要在<strong>新终端</strong>运行时会明确说明。</li>
+  <li>工作空间统一放在 <code>~/ros2_ws</code>。</li>
+  <li>代码块右上角有「复制」按钮；带文件名的代码块表示要写入该路径的文件。</li>
+  <li>彩色提示框含义：<span style="color:var(--tip)">绿色是技巧</span>，<span style="color:var(--warn)">黄色是易错点</span>，<span style="color:var(--danger)">红色是会导致故障的错误</span>，<span style="color:var(--note)">蓝色是补充知识</span>。</li>
+  <li>每章结尾有自测题（点击展开答案）和可勾选的自查清单，勾选状态会自动保存。</li>
+</ul>
+
+<h2>官方资源</h2>
+<ul>
+  <li><a href="https://docs.ros.org/en/jazzy/" target="_blank" rel="noopener">ROS2 Jazzy 官方文档</a>（最权威的参考，遇到疑问优先查这里）</li>
+  <li><a href="https://docs.nav2.org/" target="_blank" rel="noopener">Navigation2 文档</a></li>
+  <li><a href="https://moveit.picknik.ai/main/index.html" target="_blank" rel="noopener">MoveIt 2 文档</a></li>
+  <li><a href="https://control.ros.org/" target="_blank" rel="noopener">ros2_control 文档</a></li>
+  <li><a href="https://gazebosim.org/docs" target="_blank" rel="noopener">Gazebo 文档</a></li>
+  <li><a href="https://robotics.stackexchange.com/questions/tagged/ros2" target="_blank" rel="noopener">Robotics Stack Exchange（ROS 问答）</a></li>
+</ul>
+
+</main>
+<script src="assets/app.js"></script>
+</body>
+</html>

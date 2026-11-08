@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 11 章 日志、调试与 rosbag2 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch11" data-root="../">
+<main class="content">
+
+<h1>第 11 章　日志、调试与 rosbag2</h1>
+<p class="lead">机器人问题往往难以复现：只在某个走廊、某种光照、某次急转弯时出现。本章教你用日志定位问题、用 GDB 调试崩溃、用 rosbag2 录下现场反复回放，以及用诊断系统监控机器人健康状况。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 2.5 小时</span><span class="tag">调试必备</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>正确使用日志级别、限流和格式配置</li>
+  <li>熟练使用 rqt 系列图形工具</li>
+  <li>用 GDB 调试 C++ 节点崩溃</li>
+  <li>用 rosbag2 录制、查看、回放、截取数据，并用 Python 读取 bag</li>
+  <li>了解 diagnostics 诊断框架与 Foxglove</li>
+</ul>
+
+<h2>11.1 日志系统</h2>
+<h3>五个级别</h3>
+<table>
+  <thead><tr><th>级别</th><th>用途</th><th>示例</th></tr></thead>
+  <tbody>
+    <tr><td>DEBUG</td><td>开发时的详细信息，默认不显示</td><td>每帧的计算中间值</td></tr>
+    <tr><td>INFO</td><td>正常运行的重要事件</td><td>「已连接到串口 /dev/ttyUSB0」</td></tr>
+    <tr><td>WARN</td><td>异常但可继续运行</td><td>「IMU 数据延迟 200 ms」</td></tr>
+    <tr><td>ERROR</td><td>功能失败，需要关注</td><td>「无法规划路径」</td></tr>
+    <tr><td>FATAL</td><td>无法继续运行</td><td>「电机驱动器无响应，退出」</td></tr>
+  </tbody>
+</table>
+<h3>Python</h3>
+<script type="text/plain" class="code" data-lang="python">
+log = self.get_logger()
+log.debug(f'scan ranges: {len(msg.ranges)}')
+log.info('驱动已启动')
+log.warn('电量低于 20%', throttle_duration_sec=10.0)   # 最多每 10 秒打印一次
+log.error('串口读取失败', once=True)                   # 只打印一次
+</script>
+<h3>C++</h3>
+<script type="text/plain" class="code" data-lang="cpp">
+RCLCPP_DEBUG(get_logger(), "ranges=%zu", msg.ranges.size());
+RCLCPP_INFO(get_logger(), "驱动已启动");
+RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000, "电量低于 20%%");  // 毫秒
+RCLCPP_ERROR_ONCE(get_logger(), "串口读取失败");
+RCLCPP_INFO_STREAM(get_logger(), "pose: " << x << ", " << y);              // 流式写法
+</script>
+<div class="callout warn">
+  <strong>高频回调中的日志一定要限流</strong>
+  <p>在 100 Hz 的控制回调里写 INFO 日志，每秒 100 行会淹没终端，还会显著拖慢程序。使用 <code>throttle</code> 或改成 DEBUG。</p>
+</div>
+<h3>设置日志级别</h3>
+<script type="text/plain" class="code" data-lang="bash">
+# 启动时设置整个节点的级别
+ros2 run my_first_nodes talker --ros-args --log-level debug
+# 只设置某个 logger
+ros2 run my_first_nodes talker --ros-args --log-level talker:=debug
+
+# 运行时修改：节点创建时需开启日志服务
+#   Python: Node('talker', enable_logger_service=True)
+#   C++:    rclcpp::NodeOptions().enable_logger_service(true)
+ros2 service call /talker/set_logger_levels rcl_interfaces/srv/SetLoggerLevels \
+  "{levels: [{name: 'talker', level: 10}]}"     # 10=DEBUG 20=INFO 30=WARN 40=ERROR 50=FATAL
+</script>
+<h3>日志格式与输出</h3>
+<script type="text/plain" class="code" data-lang="bash">
+# 自定义格式：加上时间和文件行号
+export RCUTILS_CONSOLE_OUTPUT_FORMAT="[{severity}] [{time}] [{name}] {message} ({file_name}:{line_number})"
+export RCUTILS_COLORIZED_OUTPUT=1      # 强制彩色输出（launch 中默认会关闭颜色）
+
+ls ~/.ros/log/                         # 日志文件位置
+export ROS_LOG_DIR=/data/ros_logs      # 修改日志目录
+</script>
+<p>所有日志同时会发布到 <code>/rosout</code> 话题，可以被 rqt_console 或录包工具收集。</p>
+
+<h2>11.2 rqt 工具集</h2>
+<table>
+  <thead><tr><th>工具</th><th>命令</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td>rqt_graph</td><td><code>rqt_graph</code></td><td>节点与话题连接图</td></tr>
+    <tr><td>rqt_console</td><td><code>ros2 run rqt_console rqt_console</code></td><td>按节点、级别、关键字过滤日志</td></tr>
+    <tr><td>rqt_plot</td><td><code>ros2 run rqt_plot rqt_plot /odom/twist/twist/linear/x</code></td><td>实时绘制数值曲线（调 PID 必备）</td></tr>
+    <tr><td>rqt_reconfigure</td><td><code>ros2 run rqt_reconfigure rqt_reconfigure</code></td><td>图形化修改参数</td></tr>
+    <tr><td>rqt_topic</td><td><code>ros2 run rqt_topic rqt_topic</code></td><td>浏览话题内容与频率</td></tr>
+    <tr><td>rqt_image_view</td><td><code>ros2 run rqt_image_view rqt_image_view</code></td><td>查看图像话题</td></tr>
+    <tr><td>rqt_tf_tree</td><td><code>ros2 run rqt_tf_tree rqt_tf_tree</code></td><td>实时 TF 树（需安装 <code>ros-jazzy-rqt-tf-tree</code>）</td></tr>
+  </tbody>
+</table>
+<p>也可以直接运行 <code>rqt</code>，在 Plugins 菜单中把多个工具组合到一个窗口。</p>
+
+<h2>11.3 调试 C++ 节点</h2>
+<h3>用调试信息构建</h3>
+<script type="text/plain" class="code" data-lang="bash">
+colcon build --packages-select cpp_pubsub --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+</script>
+<h3>GDB 启动节点</h3>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y gdb
+ros2 run --prefix 'gdb -ex run --args' cpp_pubsub talker
+# 崩溃后在 gdb 中：
+#   bt          查看调用栈（最重要）
+#   frame 3     切换到第 3 层
+#   print var   打印变量
+</script>
+<p>在 launch 中：<code>Node(..., prefix=['xterm -e gdb -ex run --args'])</code>（需安装 xterm）。</p>
+<h3>常见崩溃原因</h3>
+<ul>
+  <li><strong>空指针</strong>：成员 <code>publisher_</code> 未初始化就使用；在构造函数中调用 <code>shared_from_this()</code></li>
+  <li><strong>数组越界</strong>：访问 <code>msg.ranges[i]</code> 前没检查 size</li>
+  <li><strong>未捕获异常</strong>：<code>tf2::TransformException</code>、<code>rclcpp::exceptions::ParameterNotDeclaredException</code></li>
+  <li><strong>多线程数据竞争</strong>：可用 <code>-DCMAKE_CXX_FLAGS="-fsanitize=thread"</code> 检测</li>
+</ul>
+<h3>Python 调试</h3>
+<script type="text/plain" class="code" data-lang="python">
+# 在代码中插入断点，运行到此处会进入交互调试
+import pdb; pdb.set_trace()      # 或 Python 3.7+ 直接写 breakpoint()
+</script>
+<p>VS Code / Cursor 中也可以用 Python 调试器「Attach to process」附加到运行中的节点。</p>
+
+<h2>11.4 rosbag2：录制与回放</h2>
+<p>rosbag2 把话题数据按时间戳原样保存下来，之后可以回放，就像机器人「重新经历」一遍。这是复现问题、离线开发算法、制作数据集的核心工具。</p>
+<h3>录制</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag record -o corridor_test /scan /odom /tf /tf_static /cmd_vel
+ros2 bag record -a -o all_topics                  # 所有话题（注意图像会非常大）
+ros2 bag record -a -x "/camera/.*" -o no_camera   # 排除匹配的话题
+ros2 bag record -o big --max-bag-size 1000000000  # 每 1 GB 分割一个文件
+ros2 bag record -o comp --compression-mode file --compression-format zstd
+</script>
+<div class="callout warn">
+  <strong>/tf_static 一定要录</strong>
+  <p>静态变换只在启动时发布一次（TRANSIENT_LOCAL）。如果录包开始时它已经发布过，<code>ros2 bag record</code> 会以兼容的 QoS 订阅并获取最后一条；但若录包遗漏了它，回放时传感器坐标系就全部缺失。</p>
+</div>
+<h3>查看</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag info corridor_test
+# 输出包括：存储格式（Jazzy 默认 mcap）、时长、消息总数、每个话题的类型和条数
+</script>
+<h3>回放</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag play corridor_test --clock                 # 同时发布 /clock，配合 use_sim_time
+ros2 bag play corridor_test -r 0.5                  # 半速
+ros2 bag play corridor_test --loop                  # 循环
+ros2 bag play corridor_test --topics /scan /tf /tf_static
+ros2 bag play corridor_test --start-offset 30       # 从第 30 秒开始
+ros2 bag play corridor_test --remap /scan:=/scan_raw
+# 回放时在终端按空格暂停 / 继续，按右方向键单步
+</script>
+<div class="callout danger">
+  <strong>回放时不要同时运行产生相同话题的节点</strong>
+  <p>例如回放包含 <code>/tf</code> 的 bag，同时又启动了 Gazebo 或驱动，两个来源的 TF 会冲突。回放场景下，只启动你要测试的算法节点，并设置 <code>use_sim_time:=true</code>。</p>
+</div>
+<h3>存储格式</h3>
+<table>
+  <thead><tr><th>格式</th><th>特点</th></tr></thead>
+  <tbody>
+    <tr><td>MCAP（Jazzy 默认）</td><td>单文件、写入快、支持压缩、Foxglove 等工具原生支持，推荐</td></tr>
+    <tr><td>SQLite3（Humble 默认）</td><td>老格式，兼容性好</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag record -s mcap -o test /scan              # 指定格式（Humble 需安装 ros-humble-rosbag2-storage-mcap）
+</script>
+<h3>截取与合并</h3>
+<script type="text/plain" class="code" data-lang="yaml" data-file="convert.yaml">
+output_bags:
+  - uri: corridor_scan_only
+    storage_id: mcap
+    topics: [/scan, /tf, /tf_static]
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 bag convert -i corridor_test -o convert.yaml
+</script>
+
+<h2>11.5 用 Python 读取 bag</h2>
+<p>离线分析数据（例如统计激光最近障碍物距离）时，直接读文件比回放更快：</p>
+<script type="text/plain" class="code" data-lang="python" data-file="analyze_bag.py">
+import rosbag2_py
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
+
+
+def read_bag(path):
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=path, storage_id='mcap'),
+        rosbag2_py.ConverterOptions('', ''))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+
+    reader.set_filter(rosbag2_py.StorageFilter(topics=['/scan']))
+    while reader.has_next():
+        topic, data, t_ns = reader.read_next()
+        msg = deserialize_message(data, get_message(types[topic]))
+        valid = [r for r in msg.ranges if msg.range_min < r < msg.range_max]
+        if valid:
+            print(f'{t_ns / 1e9:.3f}s  最近障碍物 {min(valid):.2f} m')
+
+
+if __name__ == '__main__':
+    read_bag('corridor_test')
+</script>
+<p>在已 source ROS 环境的终端运行 <code>python3 analyze_bag.py</code>。</p>
+
+<h2>11.6 诊断系统（diagnostics）</h2>
+<p>生产机器人需要持续监控各部件状态：电池、电机温度、传感器频率、CPU 负载等。ROS 的约定是各节点把状态发布到 <code>/diagnostics</code>（<code>diagnostic_msgs/msg/DiagnosticArray</code>），由聚合器汇总。</p>
+<script type="text/plain" class="code" data-lang="python">
+from diagnostic_updater import Updater, DiagnosticStatusWrapper
+from diagnostic_msgs.msg import DiagnosticStatus
+
+
+class BatteryMonitor(Node):
+    def __init__(self):
+        super().__init__('battery_monitor')
+        self.voltage = 12.4
+        self.updater = Updater(self)
+        self.updater.setHardwareID('battery_01')
+        self.updater.add('Battery', self.check_battery)
+
+    def check_battery(self, stat: DiagnosticStatusWrapper):
+        if self.voltage < 11.0:
+            stat.summary(DiagnosticStatus.ERROR, '电压过低')
+        elif self.voltage < 11.6:
+            stat.summary(DiagnosticStatus.WARN, '电压偏低')
+        else:
+            stat.summary(DiagnosticStatus.OK, '正常')
+        stat.add('voltage', f'{self.voltage:.2f}')
+        return stat
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-diagnostic-updater ros-jazzy-rqt-robot-monitor
+ros2 run rqt_robot_monitor rqt_robot_monitor     # 图形化查看诊断状态
+</script>
+
+<h2>11.7 Foxglove</h2>
+<p><a href="https://foxglove.dev" target="_blank" rel="noopener">Foxglove</a> 是现代化的机器人数据可视化工具，可以直接打开 MCAP 文件，也可以通过 WebSocket 连接实时系统，支持 3D、图表、图像、日志等多种面板组合，适合远程调试和团队共享。</p>
+<script type="text/plain" class="code" data-lang="bash">
+sudo apt install -y ros-jazzy-foxglove-bridge
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml     # 默认端口 8765
+# 然后在 Foxglove 中选择 Open connection → ws://localhost:8765
+</script>
+
+<h2>11.8 系统化调试流程</h2>
+<ol>
+  <li><strong>节点在不在</strong>：<code>ros2 node list</code></li>
+  <li><strong>数据有没有</strong>：<code>ros2 topic hz</code>、<code>ros2 topic echo --once</code></li>
+  <li><strong>连接对不对</strong>：<code>ros2 node info</code>、<code>ros2 topic info -v</code>（QoS、发布 / 订阅数量）</li>
+  <li><strong>坐标对不对</strong>：<code>view_frames</code>、<code>tf2_echo</code>、RViz</li>
+  <li><strong>时间对不对</strong>：所有节点 <code>use_sim_time</code> 一致？时间戳是否合理？</li>
+  <li><strong>参数对不对</strong>：<code>ros2 param dump</code></li>
+  <li><strong>日志说了什么</strong>：rqt_console 过滤 WARN 以上</li>
+  <li><strong>能否复现</strong>：录包，离线回放，二分定位</li>
+</ol>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 回放 bag 时 SLAM 节点报「extrapolation into the past」，最可能的原因？</summary>
+<div>SLAM 节点使用了系统时间（<code>use_sim_time</code> 为 false），而 bag 中消息时间戳是录制时的旧时间。应以 <code>--clock</code> 回放，并将 SLAM 节点的 <code>use_sim_time</code> 设为 true。</div></details>
+<details class="quiz"><summary>2. 录一段包含 1080p 相机的 bag，10 分钟后磁盘满了，该如何优化？</summary>
+<div>只录需要的话题；录压缩图像话题（<code>/image_raw/compressed</code>）而非原始图像；启用 zstd 压缩；用 <code>--max-bag-size</code> 分割并及时转移；或降低相机帧率 / 分辨率。</div></details>
+<details class="quiz"><summary>3. 节点在 launch 中启动时日志没有颜色，如何开启？</summary>
+<div>设置环境变量 <code>RCUTILS_COLORIZED_OUTPUT=1</code>。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>会使用 throttle / once 避免日志刷屏</li>
+  <li>会在启动时与运行时修改日志级别</li>
+  <li>用 GDB 拿到过一次崩溃的调用栈</li>
+  <li>录制仿真中小车行驶的 bag，并能以 <code>--clock</code> 回放到 RViz</li>
+  <li>用 Python 脚本读取过 bag 中的数据</li>
+  <li>掌握 8 步系统化调试流程</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

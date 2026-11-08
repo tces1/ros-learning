@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 章 话题与 QoS · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch04" data-root="../">
+<main class="content">
+
+<h1>第 4 章　话题（Topic）与 QoS</h1>
+<p class="lead">话题是 ROS 中使用最多的通信方式。本章讲清楚常用消息类型、如何自定义消息、QoS 策略及其兼容规则，以及执行器与回调组。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">核心章节</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>熟悉 <code>std_msgs</code>、<code>geometry_msgs</code>、<code>sensor_msgs</code>、<code>nav_msgs</code> 中的常用消息</li>
+  <li>创建自定义接口包，定义 msg / srv / action</li>
+  <li>理解 QoS 各策略的含义，能排查「订阅不到数据」的问题</li>
+  <li>会用多线程执行器与回调组处理并发</li>
+</ul>
+
+<h2>4.1 话题的工作方式</h2>
+<pre class="diagram">
+  Publisher A ──┐                          ┌──► Subscriber X
+                ├──►  /scan  (LaserScan) ──┤
+  Publisher B ──┘                          └──► Subscriber Y
+</pre>
+<ul>
+  <li><strong>多对多</strong>：一个话题可以有多个发布者和多个订阅者</li>
+  <li><strong>匿名</strong>：发布者不知道谁在订阅，订阅者也不知道数据来自哪个发布者</li>
+  <li><strong>异步单向</strong>：发布后立即返回，不等待接收方处理</li>
+  <li><strong>强类型</strong>：同一话题上所有参与者必须使用相同的消息类型</li>
+</ul>
+
+<h2>4.2 常用消息类型</h2>
+<table>
+  <thead><tr><th>包</th><th>消息</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="2"><code>std_msgs</code></td><td><code>Header</code></td><td>时间戳 <code>stamp</code> + 坐标系 <code>frame_id</code>，几乎所有传感器消息的第一个字段</td></tr>
+    <tr><td><code>String</code>、<code>Bool</code>、<code>Float64</code> …</td><td>简单数据，适合调试；正式项目建议用语义明确的自定义消息</td></tr>
+    <tr><td rowspan="4"><code>geometry_msgs</code></td><td><code>Twist</code> / <code>TwistStamped</code></td><td>线速度 + 角速度，底盘速度指令 <code>/cmd_vel</code></td></tr>
+    <tr><td><code>Pose</code> / <code>PoseStamped</code></td><td>位置 + 姿态（四元数），导航目标</td></tr>
+    <tr><td><code>TransformStamped</code></td><td>坐标变换，TF 使用</td></tr>
+    <tr><td><code>Point</code>、<code>Quaternion</code>、<code>Vector3</code></td><td>基础几何量</td></tr>
+    <tr><td rowspan="5"><code>sensor_msgs</code></td><td><code>LaserScan</code></td><td>2D 激光雷达</td></tr>
+    <tr><td><code>PointCloud2</code></td><td>3D 点云</td></tr>
+    <tr><td><code>Image</code> / <code>CompressedImage</code> / <code>CameraInfo</code></td><td>相机图像与内参</td></tr>
+    <tr><td><code>Imu</code></td><td>惯性测量单元</td></tr>
+    <tr><td><code>JointState</code></td><td>关节位置、速度、力矩</td></tr>
+    <tr><td rowspan="3"><code>nav_msgs</code></td><td><code>Odometry</code></td><td>里程计：位姿 + 速度 + 协方差</td></tr>
+    <tr><td><code>OccupancyGrid</code></td><td>2D 栅格地图</td></tr>
+    <tr><td><code>Path</code></td><td>一串位姿组成的路径</td></tr>
+  </tbody>
+</table>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 interface list | grep msg          # 所有可用消息
+ros2 interface show nav_msgs/msg/Odometry
+ros2 interface proto geometry_msgs/msg/Twist   # 打印可直接填写的 YAML 模板
+</script>
+<div class="callout tip">
+  <strong>单位约定（REP-103）</strong>
+  <p>ROS 统一使用国际单位：米、秒、弧度、千克、牛顿。角度一律用弧度，坐标系右手系，x 向前、y 向左、z 向上。</p>
+</div>
+
+<h2>4.3 自定义接口包</h2>
+<p>标准消息不能表达你的业务数据时，就需要自定义。<strong>强烈建议把接口放在单独的包里</strong>（如 <code>my_interfaces</code>），算法包只依赖它，避免循环依赖。接口包必须是 <code>ament_cmake</code> 类型（即使你只写 Python）。</p>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws/src
+ros2 pkg create my_interfaces --build-type ament_cmake --license Apache-2.0
+cd my_interfaces && mkdir msg srv action
+</script>
+<h3>定义消息、服务、动作</h3>
+<script type="text/plain" class="code" data-lang="ros" data-file="my_interfaces/msg/RobotStatus.msg">
+# 机器人状态（字段名必须小写+下划线，常量必须大写）
+uint8 MODE_IDLE=0
+uint8 MODE_MOVING=1
+uint8 MODE_CHARGING=2
+
+std_msgs/Header header
+string robot_name
+uint8 mode
+float32 battery_percent          # 0.0 ~ 100.0
+geometry_msgs/Point position
+float32[] motor_temperatures     # 变长数组
+</script>
+<script type="text/plain" class="code" data-lang="ros" data-file="my_interfaces/srv/SetMode.srv">
+# 请求
+uint8 mode
+---
+# 响应
+bool success
+string message
+</script>
+<script type="text/plain" class="code" data-lang="ros" data-file="my_interfaces/action/MoveDistance.action">
+# 目标
+float32 distance        # 要前进的距离（米）
+---
+# 结果
+float32 traveled
+bool success
+---
+# 反馈
+float32 remaining
+</script>
+<h3>构建配置</h3>
+<script type="text/plain" class="code" data-lang="cmake" data-file="my_interfaces/CMakeLists.txt">
+cmake_minimum_required(VERSION 3.8)
+project(my_interfaces)
+
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/RobotStatus.msg"
+  "srv/SetMode.srv"
+  "action/MoveDistance.action"
+  DEPENDENCIES std_msgs geometry_msgs
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+ament_package()
+</script>
+<script type="text/plain" class="code" data-lang="xml" data-file="my_interfaces/package.xml（在 buildtool_depend 之后加入）">
+<buildtool_depend>rosidl_default_generators</buildtool_depend>
+<depend>std_msgs</depend>
+<depend>geometry_msgs</depend>
+<exec_depend>rosidl_default_runtime</exec_depend>
+<member_of_group>rosidl_interface_packages</member_of_group>
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+cd ~/ros2_ws
+colcon build --packages-select my_interfaces
+source install/setup.bash
+ros2 interface show my_interfaces/msg/RobotStatus
+</script>
+<h3>在 Python 中使用</h3>
+<p>先在 <code>my_first_nodes/package.xml</code> 中加入 <code>&lt;depend&gt;my_interfaces&lt;/depend&gt;</code>。</p>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/status_publisher.py">
+import random
+
+import rclpy
+from rclpy.node import Node
+from my_interfaces.msg import RobotStatus
+
+
+class StatusPublisher(Node):
+    def __init__(self):
+        super().__init__('status_publisher')
+        self.pub = self.create_publisher(RobotStatus, 'robot_status', 10)
+        self.battery = 100.0
+        self.create_timer(1.0, self.on_timer)
+
+    def on_timer(self):
+        msg = RobotStatus()
+        msg.header.stamp = self.get_clock().now().to_msg()   # 时间戳必须填
+        msg.header.frame_id = 'base_link'
+        msg.robot_name = 'bot_01'
+        msg.mode = RobotStatus.MODE_MOVING                   # 使用常量
+        self.battery = max(0.0, self.battery - 0.5)
+        msg.battery_percent = self.battery
+        msg.position.x = random.uniform(0, 5)
+        msg.motor_temperatures = [35.2, 36.1]
+        self.pub.publish(msg)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(StatusPublisher())
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<h3>在 C++ 中使用</h3>
+<p>在 <code>CMakeLists.txt</code> 中 <code>find_package(my_interfaces REQUIRED)</code>，并把 <code>my_interfaces</code> 加入 <code>ament_target_dependencies</code>。头文件名是类名转为蛇形：</p>
+<script type="text/plain" class="code" data-lang="cpp">
+#include "my_interfaces/msg/robot_status.hpp"   // RobotStatus -> robot_status.hpp
+
+auto msg = my_interfaces::msg::RobotStatus();
+msg.mode = my_interfaces::msg::RobotStatus::MODE_IDLE;
+</script>
+
+<h2>4.4 QoS 服务质量</h2>
+<p>QoS 决定了消息「怎么送达」。ROS1 只有一个队列长度；ROS2 继承了 DDS 的完整 QoS，能适应从本机共享内存到不稳定 Wi-Fi 的各种场景。</p>
+<h3>主要策略</h3>
+<table>
+  <thead><tr><th>策略</th><th>取值</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>History 历史</td><td><code>KEEP_LAST</code> + depth / <code>KEEP_ALL</code></td><td>缓存最近 N 条还是全部</td></tr>
+    <tr><td>Reliability 可靠性</td><td><code>RELIABLE</code> / <code>BEST_EFFORT</code></td><td>丢包后重传 / 不重传</td></tr>
+    <tr><td>Durability 持久性</td><td><code>VOLATILE</code> / <code>TRANSIENT_LOCAL</code></td><td>晚加入的订阅者能否收到之前发布的消息（类似 ROS1 的 latch）</td></tr>
+    <tr><td>Deadline 截止期</td><td>时长</td><td>期望的最大发布间隔，超时触发事件</td></tr>
+    <tr><td>Lifespan 寿命</td><td>时长</td><td>消息过期时间，过期不再投递</td></tr>
+    <tr><td>Liveliness 存活性</td><td><code>AUTOMATIC</code> / <code>MANUAL_BY_TOPIC</code> + lease</td><td>如何判断发布者还活着</td></tr>
+  </tbody>
+</table>
+<h3>预设配置</h3>
+<table>
+  <thead><tr><th>预设</th><th>配置</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr><td>默认（传入整数 10）</td><td>RELIABLE, VOLATILE, KEEP_LAST(10)</td><td>大多数话题</td></tr>
+    <tr><td><code>qos_profile_sensor_data</code></td><td>BEST_EFFORT, VOLATILE, KEEP_LAST(5)</td><td>高频传感器，宁可丢帧不要延迟</td></tr>
+    <tr><td>地图 / 机器人描述</td><td>RELIABLE, TRANSIENT_LOCAL, KEEP_LAST(1)</td><td><code>/map</code>、<code>/robot_description</code>、<code>/tf_static</code></td></tr>
+    <tr><td><code>qos_profile_parameters</code></td><td>RELIABLE, KEEP_LAST(1000)</td><td>参数服务</td></tr>
+  </tbody>
+</table>
+<h3>兼容规则（重点）</h3>
+<p>发布者和订阅者的 QoS 不兼容时，<strong>不会报错，只是连不上</strong>，这是初学者最常踩的坑。规则是「订阅者的要求不能高于发布者的承诺」：</p>
+<table>
+  <thead><tr><th>发布者</th><th>订阅者</th><th>能否连接</th></tr></thead>
+  <tbody>
+    <tr><td>RELIABLE</td><td>RELIABLE</td><td>能</td></tr>
+    <tr><td>RELIABLE</td><td>BEST_EFFORT</td><td>能</td></tr>
+    <tr><td>BEST_EFFORT</td><td>BEST_EFFORT</td><td>能</td></tr>
+    <tr><td>BEST_EFFORT</td><td>RELIABLE</td><td><strong>不能</strong></td></tr>
+    <tr><td>TRANSIENT_LOCAL</td><td>VOLATILE</td><td>能（但收不到历史消息）</td></tr>
+    <tr><td>VOLATILE</td><td>TRANSIENT_LOCAL</td><td><strong>不能</strong></td></tr>
+  </tbody>
+</table>
+<h3>代码中设置 QoS</h3>
+<script type="text/plain" class="code" data-lang="python">
+from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy,
+                       HistoryPolicy, qos_profile_sensor_data)
+
+# 订阅激光：用传感器预设
+self.create_subscription(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
+
+# 订阅地图：必须用 TRANSIENT_LOCAL，否则启动晚了就永远拿不到地图
+map_qos = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
+self.create_subscription(OccupancyGrid, 'map', self.on_map, map_qos)
+</script>
+<script type="text/plain" class="code" data-lang="cpp">
+// C++ 链式写法
+auto map_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+auto sub = create_subscription<nav_msgs::msg::OccupancyGrid>("map", map_qos, cb);
+
+auto scan_sub = create_subscription<sensor_msgs::msg::LaserScan>(
+  "scan", rclcpp::SensorDataQoS(), scan_cb);
+</script>
+<h3>排查 QoS 问题</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 topic info /scan --verbose    # 列出每个发布者 / 订阅者的完整 QoS
+ros2 doctor --report               # 会提示不兼容的 QoS 连接
+
+# echo 默认会自动适配发布者的 QoS；也可手动指定
+ros2 topic echo /scan --qos-reliability best_effort
+</script>
+
+<h2>4.5 执行器与回调组</h2>
+<p>执行器（Executor）负责调度回调。理解它可以避免「程序卡住」和「数据竞争」两类问题。</p>
+<table>
+  <thead><tr><th>执行器</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>SingleThreadedExecutor</code></td><td>默认，<code>spin()</code> 使用它；所有回调串行执行</td></tr>
+    <tr><td><code>MultiThreadedExecutor</code></td><td>线程池并行执行回调，并行程度由回调组决定</td></tr>
+    <tr><td><code>EventsExecutor</code>（C++，实验性）</td><td>事件驱动，CPU 占用更低</td></tr>
+  </tbody>
+</table>
+<table>
+  <thead><tr><th>回调组</th><th>行为</th></tr></thead>
+  <tbody>
+    <tr><td><code>MutuallyExclusiveCallbackGroup</code>（默认）</td><td>组内回调不会同时执行</td></tr>
+    <tr><td><code>ReentrantCallbackGroup</code></td><td>组内回调可以并行执行，甚至同一回调可重入</td></tr>
+  </tbody>
+</table>
+<p>示例：一个慢的图像处理回调不应该阻塞快速的心跳定时器。</p>
+<script type="text/plain" class="code" data-lang="python">
+import time
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from std_msgs.msg import String
+
+
+class Worker(Node):
+    def __init__(self):
+        super().__init__('worker')
+        slow_group = MutuallyExclusiveCallbackGroup()
+        fast_group = MutuallyExclusiveCallbackGroup()
+        self.create_subscription(String, 'jobs', self.on_job, 10, callback_group=slow_group)
+        self.create_timer(0.2, self.heartbeat, callback_group=fast_group)
+
+    def on_job(self, msg):
+        self.get_logger().info(f'开始处理 {msg.data}')
+        time.sleep(2.0)                       # 模拟耗时计算
+        self.get_logger().info('处理完成')
+
+    def heartbeat(self):
+        self.get_logger().info('心跳', throttle_duration_sec=1.0)
+
+
+def main():
+    rclpy.init()
+    node = Worker()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    executor.spin()
+</script>
+<div class="callout warn">
+  <strong>多线程就要考虑线程安全</strong>
+  <p>不同回调组的回调可能同时访问同一成员变量，需要加锁（Python <code>threading.Lock</code>，C++ <code>std::mutex</code>）。</p>
+</div>
+
+<h2>4.6 性能与最佳实践</h2>
+<ul>
+  <li><strong>消息要有时间戳</strong>：传感器数据的 <code>header.stamp</code> 应填采集时刻，而不是处理时刻。</li>
+  <li><strong>大消息用 C++ 和进程内通信</strong>：图像、点云在 Python 中序列化很慢。</li>
+  <li><strong>C++ 中用 <code>std::unique_ptr</code> 发布</strong>：<code>publisher_-&gt;publish(std::move(msg))</code>，配合进程内通信可零拷贝。</li>
+  <li><strong>队列深度不要盲目设大</strong>：控制指令只关心最新值，depth=1 即可；过大会导致处理旧数据。</li>
+  <li><strong>话题命名用名词</strong>：<code>scan</code>、<code>odom</code>、<code>battery_state</code>；动作性的请求用服务或动作。</li>
+</ul>
+
+<h2>4.7 ROS1 对照</h2>
+<table>
+  <thead><tr><th>ROS1</th><th>ROS2</th></tr></thead>
+  <tbody>
+    <tr><td><code>rospy.Publisher('chatter', String, queue_size=10)</code></td><td><code>node.create_publisher(String, 'chatter', 10)</code></td></tr>
+    <tr><td><code>latch=True</code></td><td><code>DurabilityPolicy.TRANSIENT_LOCAL</code></td></tr>
+    <tr><td><code>tcp_nodelay</code> / <code>udp</code> 传输提示</td><td><code>BEST_EFFORT</code> 等 QoS</td></tr>
+    <tr><td>消息头 <code>Header.seq</code></td><td>已移除</td></tr>
+    <tr><td><code>rospy.Time.now()</code></td><td><code>node.get_clock().now()</code></td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 你订阅了 Gazebo 发布的 <code>/camera/image_raw</code>，回调从来不触发，<code>ros2 topic echo</code> 却能看到数据，最可能的原因？</summary>
+<div>QoS 不兼容。相机驱动通常以 BEST_EFFORT 发布，而你用整数 10 创建的订阅默认是 RELIABLE。<code>ros2 topic echo</code> 会自动适配所以能看到。改用 <code>qos_profile_sensor_data</code> 订阅即可。用 <code>ros2 topic info -v</code> 可以确认。</div></details>
+<details class="quiz"><summary>2. 地图服务器启动 10 秒后你才启动 RViz，为什么 RViz 仍能显示地图？</summary>
+<div>地图以 TRANSIENT_LOCAL 发布，发布者会为晚加入的订阅者保留最后一条消息（depth=1）。RViz 的 Map 显示也使用 TRANSIENT_LOCAL 订阅，所以连接建立时就收到了历史地图。</div></details>
+<details class="quiz"><summary>3. 消息字段能命名为 <code>batteryPercent</code> 吗？</summary>
+<div>不能。字段名必须是小写字母开头、只含小写字母、数字和下划线（snake_case），否则 <code>rosidl</code> 生成代码时报错。常量名必须全部大写。</div></details>
+<details class="quiz"><summary>4. 单线程执行器下，一个订阅回调耗时 2 秒，同一节点 10 Hz 的定时器会怎样？</summary>
+<div>定时器在这 2 秒内无法执行，回调结束后也不会补齐错过的周期。解决办法是使用多线程执行器并把两个回调放入不同的互斥回调组，或把耗时计算移到独立线程。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>能说出 Twist、PoseStamped、LaserScan、Odometry 的用途</li>
+  <li>成功创建 <code>my_interfaces</code> 并在 Python 中发布 <code>RobotStatus</code></li>
+  <li>理解 RELIABLE / BEST_EFFORT 与 VOLATILE / TRANSIENT_LOCAL 的兼容规则</li>
+  <li>会用 <code>ros2 topic info -v</code> 排查 QoS 问题</li>
+  <li>会用 MultiThreadedExecutor + 回调组避免回调互相阻塞</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

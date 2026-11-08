@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 16 章 毕业项目：差速小车全栈 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch16" data-root="../">
+<main class="content">
+
+<h1>第 16 章　毕业项目：差速小车全栈</h1>
+<p class="lead">把前 15 章的内容整合成一个完整项目：一辆在仿真房间中自主建图、定位、多航点巡逻，并带安全停车和状态监控的小车。项目完成后，你将拥有一个可以写进简历的 ROS2 作品。</p>
+<div class="meta-bar"><span class="tag">建议用时 2–4 周</span><span class="tag">综合实战</span></div>
+
+<h2>16.1 项目需求</h2>
+<table>
+  <thead><tr><th>编号</th><th>需求</th><th>涉及章节</th><th>必做 / 选做</th></tr></thead>
+  <tbody>
+    <tr><td>R1</td><td>URDF 描述差速小车（底盘、双轮、万向轮、激光雷达），参数可配置</td><td>8</td><td>必做</td></tr>
+    <tr><td>R2</td><td>Gazebo 中运行，支持键盘遥控</td><td>9</td><td>必做</td></tr>
+    <tr><td>R3</td><td>用 SLAM 建图并保存地图</td><td>13</td><td>必做</td></tr>
+    <tr><td>R4</td><td>在已知地图中用 AMCL 定位，Nav2 点到点导航</td><td>13</td><td>必做</td></tr>
+    <tr><td>R5</td><td>Python 程序实现多航点循环巡逻，可通过服务启动 / 停止</td><td>5、13</td><td>必做</td></tr>
+    <tr><td>R6</td><td>一条命令启动完整系统，参数集中在 YAML</td><td>6</td><td>必做</td></tr>
+    <tr><td>R7</td><td>发布机器人状态（自定义消息），包含巡逻状态与当前航点</td><td>4</td><td>必做</td></tr>
+    <tr><td>R8</td><td>单元测试 + README + 演示录包</td><td>10、11</td><td>必做</td></tr>
+    <tr><td>E1</td><td>改用 ros2_control 驱动底盘</td><td>12</td><td>选做</td></tr>
+    <tr><td>E2</td><td>添加相机，检测到红色物体时暂停巡逻并报告位置</td><td>15</td><td>选做</td></tr>
+    <tr><td>E3</td><td>两台机器人同时巡逻（命名空间）</td><td>6</td><td>选做</td></tr>
+    <tr><td>E4</td><td>Foxglove 远程监控面板</td><td>11</td><td>选做</td></tr>
+  </tbody>
+</table>
+
+<h2>16.2 系统架构</h2>
+<pre class="diagram">
+                        ┌────────────────────── my_bot_apps ──────────────────────┐
+  ros2 service call ───►│ patrol_manager                                          │
+  /patrol/start|stop    │   ├ 读取航点参数                                         │
+                        │   ├ BasicNavigator.followWaypoints() ──► Nav2           │
+                        │   └ 发布 /robot_status (my_bot_interfaces/RobotStatus)  │
+                        └─────────────────────────────────────────────────────────┘
+                                                │ NavigateThroughPoses / FollowWaypoints
+  ┌──────────────────────────────── Nav2 ───────▼─────────────────────────────────┐
+  │ map_server + AMCL ── map→odom      planner / controller / behaviors ── cmd_vel │
+  └───────────────────────────────────────────────────────────────┬────────────────┘
+                                                                  ▼ /cmd_vel
+  ┌───────────── Gazebo + ros_gz_bridge ─────────────┐   robot_state_publisher
+  │ DiffDrive ── /odom, odom→base_footprint          │   （URDF → 固定关节 TF）
+  │ gpu_lidar ── /scan     JointStatePublisher       │
+  └──────────────────────────────────────────────────┘
+</pre>
+
+<h2>16.3 仓库结构</h2>
+<pre class="diagram">
+~/ros2_ws/src/my_bot/                    ← Git 仓库根目录
+├── README.md
+├── my_bot.repos                         （如有外部源码依赖）
+├── my_bot_interfaces/                   msg/RobotStatus.msg   srv/（使用 std_srvs/Trigger 即可）
+├── my_bot_description/                  第 8 章：urdf/  launch/display.launch.py  rviz/
+├── my_bot_gazebo/                       第 9 章：worlds/room.sdf  config/bridge.yaml  launch/sim.launch.py
+├── my_bot_navigation/
+│   ├── config/nav2_params.yaml          第 13 章调好的参数
+│   ├── maps/room.yaml, room.pgm         SLAM 生成的地图
+│   └── launch/
+│       ├── mapping.launch.py            仿真 + SLAM
+│       └── navigation.launch.py         仿真 + Nav2
+├── my_bot_apps/                         ament_python
+│   ├── my_bot_apps/patrol_manager.py
+│   ├── my_bot_apps/route_utils.py       纯函数，便于测试
+│   ├── config/patrol.yaml
+│   └── test/test_route_utils.py
+└── my_bot_bringup/
+    └── launch/patrol_demo.launch.py     一条命令启动全部
+</pre>
+
+<h2>16.4 里程碑</h2>
+<h3>里程碑 1：模型与仿真（第 1 周）</h3>
+<ul>
+  <li>完成第 8、9 章的 <code>my_bot_description</code> 与 <code>my_bot_gazebo</code></li>
+  <li>验收：<code>ros2 launch my_bot_gazebo sim.launch.py</code> 后可键盘遥控；<code>view_frames</code> 中 TF 树完整</li>
+</ul>
+
+<h3>里程碑 2：建图（第 1–2 周）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_navigation/launch/mapping.launch.py">
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('my_bot_gazebo'), 'launch', 'sim.launch.py'])))
+    slam = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('slam_toolbox'), 'launch', 'online_async_launch.py'])),
+        launch_arguments={'use_sim_time': 'true'}.items())
+    return LaunchDescription([sim, slam])
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 launch my_bot_navigation mapping.launch.py
+ros2 run teleop_twist_keyboard teleop_twist_keyboard        # 慢速绕房间一圈并回到起点
+ros2 run nav2_map_server map_saver_cli -f ~/ros2_ws/src/my_bot/my_bot_navigation/maps/room
+</script>
+<ul><li>验收：地图墙壁连续、无重影，障碍物位置正确</li></ul>
+
+<h3>里程碑 3：导航（第 2 周）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_navigation/launch/navigation.launch.py">
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    nav_pkg = FindPackageShare('my_bot_navigation')
+    nav2_bringup = FindPackageShare('nav2_bringup')
+
+    sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('my_bot_gazebo'), 'launch', 'sim.launch.py'])),
+        launch_arguments={'rviz': 'false'}.items())
+
+    nav2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([nav2_bringup, 'launch', 'bringup_launch.py'])),
+        launch_arguments={
+            'map': LaunchConfiguration('map'),
+            'params_file': PathJoinSubstitution([nav_pkg, 'config', 'nav2_params.yaml']),
+            'use_sim_time': 'true',
+        }.items())
+
+    rviz = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([nav2_bringup, 'launch', 'rviz_launch.py'])),
+        launch_arguments={'use_sim_time': 'true'}.items())
+
+    return LaunchDescription([
+        DeclareLaunchArgument('map', default_value=PathJoinSubstitution([nav_pkg, 'maps', 'room.yaml'])),
+        sim,
+        TimerAction(period=5.0, actions=[nav2, rviz]),     # 等 Gazebo 与 TF 就绪
+    ])
+</script>
+<script type="text/plain" class="code" data-lang="cmake" data-file="my_bot_navigation/CMakeLists.txt（ament_package() 之前）">
+install(DIRECTORY launch config maps
+  DESTINATION share/${PROJECT_NAME})
+</script>
+<ul>
+  <li>在 <code>nav2_params.yaml</code> 中设置 <code>amcl.set_initial_pose: true</code> 与初始位姿 (0, 0, 0)，省去手动设置</li>
+  <li>验收：RViz 中连续给 10 个不同目标，至少 9 次成功到达</li>
+</ul>
+
+<h3>里程碑 4：巡逻管理器（第 3 周）</h3>
+<script type="text/plain" class="code" data-lang="ros" data-file="my_bot_interfaces/msg/RobotStatus.msg">
+uint8 STATE_IDLE=0
+uint8 STATE_PATROLLING=1
+uint8 STATE_FAILED=2
+
+std_msgs/Header header
+uint8 state
+uint32 lap
+uint32 current_waypoint
+uint32 total_waypoints
+string message
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/my_bot_apps/route_utils.py">
+import math
+
+
+def parse_waypoints(flat):
+    """把 [x0, y0, yaw0, x1, y1, yaw1, ...] 转为 [(x, y, yaw), ...]。"""
+    if len(flat) % 3 != 0:
+        raise ValueError('waypoints 长度必须是 3 的倍数')
+    return [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)]
+
+
+def yaw_to_quaternion(yaw):
+    return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
+
+
+def route_length(points):
+    return sum(math.dist(points[i][:2], points[i + 1][:2]) for i in range(len(points) - 1))
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/my_bot_apps/patrol_manager.py">
+import threading
+
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from std_srvs.srv import Trigger
+
+from my_bot_interfaces.msg import RobotStatus
+from my_bot_apps.route_utils import parse_waypoints, yaw_to_quaternion
+
+
+class PatrolManager(Node):
+    def __init__(self, navigator: BasicNavigator):
+        super().__init__('patrol_manager')
+        self.nav = navigator
+        self.declare_parameter('waypoints', [2.5, 0.0, 0.0, 2.5, -2.5, -1.57, -2.5, -2.5, 3.14])
+        self.declare_parameter('loop', True)
+
+        self.points = parse_waypoints(self.get_parameter('waypoints').value)
+        self.status = RobotStatus(state=RobotStatus.STATE_IDLE,
+                                  total_waypoints=len(self.points))
+        self.running = threading.Event()
+
+        self.status_pub = self.create_publisher(RobotStatus, 'robot_status', 10)
+        self.create_service(Trigger, 'patrol/start', self.on_start)
+        self.create_service(Trigger, 'patrol/stop', self.on_stop)
+        self.create_timer(0.5, self.publish_status)
+
+    def make_pose(self, x, y, yaw):
+        pose = PoseStamped()
+        pose.header.frame_id = 'map'
+        pose.header.stamp = self.nav.get_clock().now().to_msg()
+        pose.pose.position.x, pose.pose.position.y = x, y
+        q = yaw_to_quaternion(yaw)
+        (pose.pose.orientation.x, pose.pose.orientation.y,
+         pose.pose.orientation.z, pose.pose.orientation.w) = q
+        return pose
+
+    def on_start(self, request, response):
+        if self.running.is_set():
+            response.success, response.message = False, '已在巡逻中'
+        else:
+            self.running.set()
+            threading.Thread(target=self.patrol_loop, daemon=True).start()
+            response.success, response.message = True, '开始巡逻'
+        return response
+
+    def on_stop(self, request, response):
+        self.running.clear()             # 由巡逻线程负责取消导航任务
+        response.success, response.message = True, '正在停止'
+        return response
+
+    def patrol_loop(self):
+        self.status.state = RobotStatus.STATE_PATROLLING
+        while self.running.is_set():
+            self.status.lap += 1
+            self.nav.followWaypoints([self.make_pose(*p) for p in self.points])
+            cancel_sent = False
+            while not self.nav.isTaskComplete():
+                if not self.running.is_set() and not cancel_sent:
+                    self.nav.cancelTask()
+                    cancel_sent = True
+                fb = self.nav.getFeedback()
+                if fb:
+                    self.status.current_waypoint = fb.current_waypoint
+            result = self.nav.getResult()
+            if result != TaskResult.SUCCEEDED:
+                if self.running.is_set():
+                    self.status.state = RobotStatus.STATE_FAILED
+                    self.status.message = f'第 {self.status.lap} 圈失败'
+                break
+            if not self.get_parameter('loop').value:
+                break
+        self.running.clear()
+        if self.status.state != RobotStatus.STATE_FAILED:
+            self.status.state = RobotStatus.STATE_IDLE
+
+    def publish_status(self):
+        self.status.header.stamp = self.get_clock().now().to_msg()
+        self.status_pub.publish(self.status)
+
+
+def main():
+    rclpy.init()
+    navigator = BasicNavigator()           # 独立节点，其方法内部使用全局执行器 spin
+    navigator.waitUntilNav2Active()
+    node = PatrolManager(navigator)
+    executor = SingleThreadedExecutor()    # 与全局执行器分开，避免两个线程争用同一执行器
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.running.clear()
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<div class="callout note">
+  <strong>为什么巡逻放在独立线程</strong>
+  <p><code>isTaskComplete()</code> 的循环会持续很久。如果放在服务回调中，节点的执行器会被阻塞，<code>patrol/stop</code> 服务和状态定时器都无法响应。<code>BasicNavigator</code> 本身是另一个节点，它的方法内部用全局执行器 spin，因此所有对 navigator 的调用（包括 <code>cancelTask()</code>）都只在巡逻线程中进行，而 PatrolManager 用自己独立的执行器运行。</p>
+</div>
+<script type="text/plain" class="code" data-lang="yaml" data-file="my_bot_apps/config/patrol.yaml">
+patrol_manager:
+  ros__parameters:
+    loop: true
+    #           x     y     yaw
+    waypoints: [ 2.5,  0.0,  0.0,
+                 2.5, -2.5, -1.57,
+                -2.5, -2.5,  3.14,
+                -2.5,  0.5,  1.57,
+                 0.0,  0.0,  0.0 ]
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run my_bot_apps patrol_manager --ros-args --params-file src/my_bot/my_bot_apps/config/patrol.yaml
+ros2 service call /patrol/start std_srvs/srv/Trigger
+ros2 topic echo /robot_status
+ros2 service call /patrol/stop std_srvs/srv/Trigger
+</script>
+
+<h3>里程碑 5：一键启动、测试与文档（第 3–4 周）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_bringup/launch/patrol_demo.launch.py">
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    navigation = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution(
+            [FindPackageShare('my_bot_navigation'), 'launch', 'navigation.launch.py'])))
+
+    patrol = Node(
+        package='my_bot_apps', executable='patrol_manager', output='screen',
+        parameters=[PathJoinSubstitution([FindPackageShare('my_bot_apps'), 'config', 'patrol.yaml']),
+                    {'use_sim_time': True}])
+
+    return LaunchDescription([navigation, TimerAction(period=10.0, actions=[patrol])])
+</script>
+<script type="text/plain" class="code" data-lang="python" data-file="my_bot_apps/test/test_route_utils.py">
+import math
+
+import pytest
+from my_bot_apps.route_utils import parse_waypoints, route_length, yaw_to_quaternion
+
+
+def test_parse_waypoints():
+    assert parse_waypoints([1, 2, 0, 3, 4, 1.57]) == [(1, 2, 0), (3, 4, 1.57)]
+
+
+def test_parse_waypoints_invalid():
+    with pytest.raises(ValueError):
+        parse_waypoints([1, 2])
+
+
+def test_yaw_to_quaternion_is_normalized():
+    q = yaw_to_quaternion(1.2)
+    assert math.isclose(sum(v * v for v in q), 1.0)
+
+
+def test_route_length():
+    assert route_length([(0, 0, 0), (3, 4, 0)]) == pytest.approx(5.0)
+</script>
+
+<h2>16.5 验收标准</h2>
+<table>
+  <thead><tr><th>项目</th><th>标准</th><th>验证方法</th></tr></thead>
+  <tbody>
+    <tr><td>一键启动</td><td>全新终端中一条命令启动成功</td><td><code>ros2 launch my_bot_bringup patrol_demo.launch.py</code></td></tr>
+    <tr><td>TF</td><td>map→odom→base_footprint→base_link→laser_link 连通</td><td><code>view_frames</code></td></tr>
+    <tr><td>定位</td><td>巡逻全程 AMCL 粒子不发散</td><td>RViz 观察</td></tr>
+    <tr><td>巡逻</td><td>连续 3 圈无失败</td><td><code>/robot_status</code> 中 lap ≥ 3 且 state 未出现 FAILED</td></tr>
+    <tr><td>控制</td><td><code>patrol/stop</code> 后 2 秒内停车</td><td>服务调用 + 观察</td></tr>
+    <tr><td>测试</td><td><code>colcon test</code> 全部通过</td><td><code>colcon test-result --verbose</code></td></tr>
+    <tr><td>可复现</td><td>他人按 README 能在新机器上跑通</td><td>请同学或在新的 Docker 容器中验证</td></tr>
+    <tr><td>录包</td><td>一圈巡逻的 MCAP 包，含 /scan /tf /tf_static /odom /robot_status</td><td><code>ros2 bag info</code></td></tr>
+  </tbody>
+</table>
+
+<h2>16.6 README 模板</h2>
+<script type="text/plain" class="code" data-lang="text" data-file="README.md">
+# my_bot：ROS2 仿真巡逻小车
+
+基于 ROS2 Jazzy + Gazebo Harmonic + Nav2 的差速小车，支持 SLAM 建图、AMCL 定位、多航点循环巡逻。
+
+## 演示
+（插入 GIF 或视频链接）
+
+## 环境
+- Ubuntu 24.04 / ROS2 Jazzy / Gazebo Harmonic
+
+## 安装
+    mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+    git clone <仓库地址> my_bot
+    cd ~/ros2_ws
+    rosdep install --from-paths src --ignore-src -r -y
+    colcon build --symlink-install
+    source install/setup.bash
+
+## 使用
+- 建图：ros2 launch my_bot_navigation mapping.launch.py
+- 巡逻：ros2 launch my_bot_bringup patrol_demo.launch.py
+- 开始 / 停止：ros2 service call /patrol/start std_srvs/srv/Trigger
+
+## 包说明
+| 包 | 说明 |
+|----|------|
+| my_bot_description | URDF 模型 |
+| ...                | ...       |
+
+## 节点与接口
+（列出主要话题、服务、参数）
+
+## 已知问题与后续计划
+</script>
+
+<h2>16.7 常见坑回顾</h2>
+<table>
+  <thead><tr><th>问题</th><th>回看章节</th></tr></thead>
+  <tbody>
+    <tr><td>某个节点未设置 <code>use_sim_time</code>，TF 报外推错误</td><td>第 2、9 章</td></tr>
+    <tr><td>订阅激光时 QoS 不匹配，代价地图没有障碍物</td><td>第 4 章</td></tr>
+    <tr><td>四元数写成全 0，Nav2 拒绝目标</td><td>第 7 章</td></tr>
+    <tr><td>多个节点发布同一 TF（如同时运行 SLAM 和 AMCL）</td><td>第 7、13 章</td></tr>
+    <tr><td>launch / config 文件没安装，修改不生效</td><td>第 6、10 章</td></tr>
+    <tr><td>robot_radius 过大，规划失败</td><td>第 13 章</td></tr>
+    <tr><td>在回调中阻塞等待，节点失去响应</td><td>第 4、5 章</td></tr>
+  </tbody>
+</table>
+
+<h2>16.8 选做提示</h2>
+<ul>
+  <li><strong>E1 ros2_control</strong>：使用第 12 章的 <code>sim_control.launch.py</code>；注意速度指令为 TwistStamped，Nav2 需开启 <code>enable_stamped_cmd_vel</code> 并重映射到 <code>/diff_drive_controller/cmd_vel</code>，里程计话题改为 <code>/diff_drive_controller/odom</code>。</li>
+  <li><strong>E2 视觉</strong>：按第 9.8 节添加相机，复用第 15 章 color_detector；检测到目标时调用 <code>patrol/stop</code>，结合深度或激光估计物体在 map 中的位置并发布 Marker。</li>
+  <li><strong>E3 多机器人</strong>：spawn 时设置不同的 <code>-name</code> 和位置，所有 ROS 节点放入命名空间，TF 坐标系加前缀（如 <code>robot1/base_link</code>），Nav2 的 bringup_launch.py 支持 <code>namespace</code> 参数。</li>
+  <li><strong>E4 Foxglove</strong>：启动 foxglove_bridge，制作含 3D 视图、地图、<code>/robot_status</code> 表格、速度曲线的面板布局，并导出 JSON 放进仓库。</li>
+</ul>
+
+<h2>16.9 下一步学什么</h2>
+<table>
+  <thead><tr><th>方向</th><th>推荐内容</th></tr></thead>
+  <tbody>
+    <tr><td>真实硬件</td><td>TurtleBot4 / 自制小车：串口驱动、ros2_control 硬件接口、IMU + 轮速 EKF 融合（robot_localization）</td></tr>
+    <tr><td>3D SLAM 与定位</td><td>Cartographer、RTAB-Map、LIO-SAM、FAST-LIO</td></tr>
+    <tr><td>机械臂</td><td>MoveIt Task Constructor、抓取检测、手眼标定（easy_handeye2）</td></tr>
+    <tr><td>嵌入式</td><td>micro-ROS：在 ESP32 / STM32 上运行 ROS2 节点</td></tr>
+    <tr><td>性能与实时</td><td>组件与零拷贝、实时内核、ros2_tracing 性能分析</td></tr>
+    <tr><td>自动驾驶</td><td>Autoware</td></tr>
+    <tr><td>GPU 加速</td><td>NVIDIA Isaac ROS、Isaac Sim</td></tr>
+  </tbody>
+</table>
+
+<div class="callout tip">
+  <strong>恭喜完成全部课程</strong>
+  <p>你已经掌握了 ROS2 的核心概念与主流工具链，并完成了一个完整的移动机器人项目。接下来最有效的成长方式是：读优秀开源项目的源码（Nav2、slam_toolbox、ros2_control_demos），给它们提 Issue 或 PR，并把你的项目部署到一台真实的机器人上。</p>
+</div>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>里程碑 1：模型与仿真完成</li>
+  <li>里程碑 2：地图已保存且质量良好</li>
+  <li>里程碑 3：导航 10 次至少成功 9 次</li>
+  <li>里程碑 4：巡逻管理器可通过服务启停，状态正确发布</li>
+  <li>里程碑 5：一键启动、测试通过、README 完成、演示录包完成</li>
+  <li>至少完成一项选做任务</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

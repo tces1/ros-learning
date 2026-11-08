@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>附录 D 术语表 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="glossary" data-root="../">
+<main class="content">
+
+<h1>附录 D　术语表</h1>
+<p class="lead">按类别整理的 ROS2 常见术语。括号内为首次详细介绍的章节。</p>
+
+<h2>D.1 核心概念</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>Node 节点</td><td>完成单一职责的程序单元（第 1、3 章）</td></tr>
+    <tr><td>Topic 话题</td><td>发布 / 订阅式的异步数据流（第 4 章）</td></tr>
+    <tr><td>Service 服务</td><td>一次请求、一次响应（第 5 章）</td></tr>
+    <tr><td>Action 动作</td><td>带反馈、可取消的长时任务（第 5 章）</td></tr>
+    <tr><td>Parameter 参数</td><td>节点的可配置项（第 5 章）</td></tr>
+    <tr><td>Interface 接口</td><td>msg / srv / action 类型定义的统称（第 4 章）</td></tr>
+    <tr><td>Executor 执行器</td><td>调度回调执行的组件（第 4 章）</td></tr>
+    <tr><td>Callback Group 回调组</td><td>控制回调能否并行执行（第 4 章）</td></tr>
+    <tr><td>Namespace 命名空间</td><td>名字前缀，用于隔离多实例（第 2、6 章）</td></tr>
+    <tr><td>Remapping 重映射</td><td>启动时修改话题 / 服务 / 节点名（第 6 章）</td></tr>
+    <tr><td>Lifecycle Node 生命周期节点</td><td>带标准状态机的节点（第 2 章）</td></tr>
+    <tr><td>Component 组件</td><td>可加载到容器进程中的节点，支持进程内通信（第 2、6 章）</td></tr>
+  </tbody>
+</table>
+
+<h2>D.2 中间件与通信</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>DDS</td><td>Data Distribution Service，ROS2 默认使用的发布 / 订阅中间件标准（第 2 章）</td></tr>
+    <tr><td>RMW</td><td>ROS MiddleWare 接口，隔离 ROS 与具体中间件实现</td></tr>
+    <tr><td>Zenoh</td><td>另一种通信中间件，Kilted 起为官方一级支持</td></tr>
+    <tr><td>QoS</td><td>Quality of Service，服务质量策略（第 4 章）</td></tr>
+    <tr><td>Domain ID</td><td>通信域编号，不同域互不可见</td></tr>
+    <tr><td>Latching</td><td>ROS1 中“锁存”最后一条消息，ROS2 对应 TRANSIENT_LOCAL</td></tr>
+    <tr><td>Intra-process 进程内通信</td><td>同一进程内节点间传递指针，避免序列化</td></tr>
+  </tbody>
+</table>
+
+<h2>D.3 构建与工程</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>Workspace 工作空间</td><td>包含 src / build / install / log 的目录（第 2 章）</td></tr>
+    <tr><td>Package 包</td><td>代码组织与构建的最小单位</td></tr>
+    <tr><td>ament</td><td>ROS2 的构建系统（ament_cmake / ament_python）</td></tr>
+    <tr><td>colcon</td><td>多包构建工具（第 10 章）</td></tr>
+    <tr><td>rosdep</td><td>依赖安装工具（第 10 章）</td></tr>
+    <tr><td>vcstool</td><td>多仓库管理工具（第 10 章）</td></tr>
+    <tr><td>Underlay / Overlay</td><td>叠加的环境层，overlay 覆盖 underlay 中的同名包</td></tr>
+    <tr><td>Bringup</td><td>启动整个机器人系统的 launch 与配置集合</td></tr>
+    <tr><td>Distro 发行版</td><td>如 Humble、Jazzy（第 1 章）</td></tr>
+    <tr><td>REP</td><td>ROS Enhancement Proposal，社区约定文档，如 REP-103（单位与坐标）、REP-105（移动机器人坐标系）</td></tr>
+  </tbody>
+</table>
+
+<h2>D.4 坐标与建模</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>TF / TF2</td><td>坐标变换库（第 7 章）</td></tr>
+    <tr><td>Frame 坐标系</td><td>TF 树中的节点，如 map、odom、base_link</td></tr>
+    <tr><td>Quaternion 四元数</td><td>姿态表示 (x, y, z, w)，必须归一化</td></tr>
+    <tr><td>Euler Angles 欧拉角</td><td>roll / pitch / yaw</td></tr>
+    <tr><td>Optical Frame 光学坐标系</td><td>相机坐标约定：z 前、x 右、y 下</td></tr>
+    <tr><td>URDF</td><td>机器人描述格式（第 8 章）</td></tr>
+    <tr><td>Xacro</td><td>URDF 的宏语言</td></tr>
+    <tr><td>SDF</td><td>Gazebo 使用的仿真描述格式（第 9 章）</td></tr>
+    <tr><td>SRDF</td><td>MoveIt 的语义描述：规划组、命名位姿、ACM（第 14 章）</td></tr>
+    <tr><td>Link / Joint</td><td>连杆 / 关节</td></tr>
+    <tr><td>Inertia 惯性张量</td><td>描述刚体转动惯性的 3×3 矩阵</td></tr>
+  </tbody>
+</table>
+
+<h2>D.5 导航与控制</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>Odometry 里程计</td><td>由轮速 / IMU 等推算的位姿，连续但会漂移</td></tr>
+    <tr><td>SLAM</td><td>同时定位与建图（第 13 章）</td></tr>
+    <tr><td>AMCL</td><td>自适应蒙特卡洛定位，基于粒子滤波</td></tr>
+    <tr><td>Occupancy Grid 占据栅格</td><td>二维栅格地图</td></tr>
+    <tr><td>Costmap 代价地图</td><td>带代价值的栅格地图，用于规划和避障</td></tr>
+    <tr><td>Inflation 膨胀</td><td>在障碍物周围增加代价，使机器人与障碍保持距离</td></tr>
+    <tr><td>Footprint</td><td>机器人在地面上的轮廓多边形</td></tr>
+    <tr><td>Global Planner 全局规划器</td><td>计算从起点到终点的完整路径</td></tr>
+    <tr><td>Controller 局部控制器</td><td>跟踪路径并实时避障，输出速度指令</td></tr>
+    <tr><td>Behavior Tree 行为树</td><td>Nav2 编排任务的方式</td></tr>
+    <tr><td>Recovery 恢复行为</td><td>卡住时执行的旋转、后退、清图等</td></tr>
+    <tr><td>EKF</td><td>扩展卡尔曼滤波，常用于融合轮速与 IMU（robot_localization）</td></tr>
+    <tr><td>Hardware Interface 硬件接口</td><td>ros2_control 中读写硬件的插件（第 12 章）</td></tr>
+    <tr><td>Controller Manager</td><td>ros2_control 中管理控制器与实时循环的组件</td></tr>
+  </tbody>
+</table>
+
+<h2>D.6 机械臂与感知</h2>
+<table>
+  <thead><tr><th>术语</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>FK / IK</td><td>正 / 逆运动学（第 14 章）</td></tr>
+    <tr><td>Planning Group 规划组</td><td>一起规划的一组关节</td></tr>
+    <tr><td>Planning Scene 规划场景</td><td>机器人状态 + 环境碰撞物体</td></tr>
+    <tr><td>ACM</td><td>Allowed Collision Matrix，允许碰撞矩阵</td></tr>
+    <tr><td>OMPL</td><td>开源运动规划库，MoveIt 默认规划器</td></tr>
+    <tr><td>Cartesian Path 笛卡尔路径</td><td>末端沿指定几何路径（如直线）运动</td></tr>
+    <tr><td>Intrinsics 内参</td><td>相机焦距、主点、畸变（第 15 章）</td></tr>
+    <tr><td>Extrinsics 外参</td><td>传感器相对机器人的安装位姿（即 TF）</td></tr>
+    <tr><td>Point Cloud 点云</td><td>三维点的集合</td></tr>
+    <tr><td>Voxel 体素</td><td>三维栅格单元，用于降采样或三维代价地图</td></tr>
+    <tr><td>rosbag / MCAP</td><td>数据录制工具 / 推荐的存储格式（第 11 章）</td></tr>
+  </tbody>
+</table>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

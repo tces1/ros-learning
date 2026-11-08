@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章 服务、参数与动作 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ch05" data-root="../">
+<main class="content">
+
+<h1>第 5 章　服务、参数与动作</h1>
+<p class="lead">话题之外的三种通信方式：用 Service 做一问一答，用 Parameter 做可配置项，用 Action 做可反馈、可取消的长任务。本章所有示例使用第 4 章创建的 <code>my_interfaces</code>。</p>
+<div class="meta-bar"><span class="tag">阅读 + 动手约 3 小时</span><span class="tag">核心章节</span></div>
+
+<h2>本章目标</h2>
+<ul>
+  <li>编写服务端和客户端，并避开「回调中同步调用服务」导致的死锁</li>
+  <li>声明带描述和取值范围的参数，用 YAML 和命令行修改，并在运行时校验</li>
+  <li>编写支持反馈、取消、拒绝目标的动作服务器和客户端</li>
+  <li>能为具体需求选择合适的通信方式</li>
+</ul>
+<div class="callout warn">
+  <strong>准备工作</strong>
+  <p>本章新增的每个 Python 文件，都要在 <code>my_first_nodes/setup.py</code> 的 <code>console_scripts</code> 中注册（如 <code>'mode_server = my_first_nodes.mode_server:main'</code>），在 <code>package.xml</code> 中加入 <code>&lt;depend&gt;my_interfaces&lt;/depend&gt;</code>，然后重新 <code>colcon build</code>。</p>
+</div>
+
+<h2>5.1 服务（Service）</h2>
+<pre class="diagram">
+  Client ── Request (mode=1) ──►  Server
+  Client ◄── Response (success=True, message="...") ── Server
+</pre>
+<ul>
+  <li>一个服务名只能有<strong>一个</strong>服务端，可以有多个客户端</li>
+  <li>适合<strong>快速完成</strong>的操作：查询、切换模式、触发一次计算</li>
+  <li>服务端的处理函数应在毫秒级返回；需要几秒以上的操作请用 Action</li>
+</ul>
+
+<h3>服务端（Python）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/mode_server.py">
+import rclpy
+from rclpy.node import Node
+from my_interfaces.srv import SetMode
+
+MODE_NAMES = {0: 'IDLE', 1: 'MOVING', 2: 'CHARGING'}
+
+
+class ModeServer(Node):
+    def __init__(self):
+        super().__init__('mode_server')
+        self.mode = 0
+        self.srv = self.create_service(SetMode, 'set_mode', self.handle_set_mode)
+        self.get_logger().info('set_mode 服务已就绪')
+
+    def handle_set_mode(self, request, response):
+        if request.mode not in MODE_NAMES:
+            response.success = False
+            response.message = f'未知模式 {request.mode}'
+        elif request.mode == self.mode:
+            response.success = True
+            response.message = f'已处于 {MODE_NAMES[self.mode]}'
+        else:
+            old = MODE_NAMES[self.mode]
+            self.mode = request.mode
+            response.success = True
+            response.message = f'{old} -> {MODE_NAMES[self.mode]}'
+        self.get_logger().info(response.message)
+        return response                     # 必须返回 response
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(ModeServer())
+
+
+if __name__ == '__main__':
+    main()
+</script>
+
+<h3>客户端（Python，独立程序）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/mode_client.py">
+import sys
+
+import rclpy
+from rclpy.node import Node
+from my_interfaces.srv import SetMode
+
+
+class ModeClient(Node):
+    def __init__(self):
+        super().__init__('mode_client')
+        self.client = self.create_client(SetMode, 'set_mode')
+        while not self.client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('等待 set_mode 服务...')
+
+    def send(self, mode: int):
+        request = SetMode.Request()
+        request.mode = mode
+        return self.client.call_async(request)      # 返回 Future
+
+
+def main():
+    rclpy.init()
+    node = ModeClient()
+    mode = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+    future = node.send(mode)
+    rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+    if future.done():
+        res = future.result()
+        node.get_logger().info(f'success={res.success} message="{res.message}"')
+    else:
+        node.get_logger().error('服务调用超时')
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run my_first_nodes mode_server
+ros2 run my_first_nodes mode_client 2        # 另一终端
+
+# 也可以直接用命令行调用
+ros2 service call /set_mode my_interfaces/srv/SetMode "{mode: 1}"
+</script>
+
+<h3>在节点回调中调用服务（避免死锁）</h3>
+<div class="callout danger">
+  <strong>经典死锁</strong>
+  <p>在订阅或定时器回调里调用 <code>spin_until_future_complete()</code> 或同步 <code>client.call()</code>，在单线程执行器下会永远卡住：执行器正忙于执行你的回调，没有机会处理服务响应。</p>
+</div>
+<p>正确做法一：异步调用 + 完成回调（推荐，最简单）：</p>
+<script type="text/plain" class="code" data-lang="python">
+def on_timer(self):
+    if not self.client.service_is_ready():
+        return
+    future = self.client.call_async(SetMode.Request(mode=1))
+    future.add_done_callback(self.on_response)     # 立即返回，不阻塞
+
+def on_response(self, future):
+    self.get_logger().info(future.result().message)
+</script>
+<p>正确做法二：客户端放入独立回调组 + 多线程执行器，然后可以在回调中同步等待：</p>
+<script type="text/plain" class="code" data-lang="python">
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+
+self.client_group = MutuallyExclusiveCallbackGroup()
+self.client = self.create_client(SetMode, 'set_mode', callback_group=self.client_group)
+# ... 在其他回调组的回调中：
+response = self.client.call(SetMode.Request(mode=1))   # 需配合 MultiThreadedExecutor
+</script>
+
+<h3>服务端（C++）</h3>
+<script type="text/plain" class="code" data-lang="cpp">
+#include "rclcpp/rclcpp.hpp"
+#include "my_interfaces/srv/set_mode.hpp"
+
+using SetMode = my_interfaces::srv::SetMode;
+
+class ModeServer : public rclcpp::Node
+{
+public:
+  ModeServer() : Node("mode_server_cpp")
+  {
+    service_ = create_service<SetMode>(
+      "set_mode",
+      [this](const std::shared_ptr<SetMode::Request> request,
+             std::shared_ptr<SetMode::Response> response) {
+        response->success = request->mode <= 2;
+        response->message = response->success ? "ok" : "unknown mode";
+        if (response->success) { mode_ = request->mode; }
+      });
+  }
+
+private:
+  rclcpp::Service<SetMode>::SharedPtr service_;
+  uint8_t mode_ = 0;
+};
+</script>
+
+<h2>5.2 参数（Parameter）</h2>
+<p>参数是节点的可配置项。ROS2 中每个节点持有自己的参数（不像 ROS1 有全局参数服务器），并且<strong>必须先声明后使用</strong>。</p>
+<h3>声明、读取与校验</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/param_demo.py">
+import rclpy
+from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, SetParametersResult
+
+
+class ParamDemo(Node):
+    def __init__(self):
+        super().__init__('param_demo')
+        self.declare_parameter(
+            'max_speed', 0.5,
+            ParameterDescriptor(
+                description='最大线速度（m/s）',
+                floating_point_range=[FloatingPointRange(from_value=0.0, to_value=2.0, step=0.0)],
+            ))
+        self.declare_parameter('robot_name', 'bot_01')
+        self.declare_parameter('sensors', ['lidar', 'imu'])
+        self.declare_parameter('debug', False)
+
+        self.max_speed = self.get_parameter('max_speed').value
+        self.add_on_set_parameters_callback(self.on_set_params)
+        self.create_timer(2.0, self.report)
+
+    def on_set_params(self, params):
+        for p in params:
+            if p.name == 'robot_name' and not p.value:
+                return SetParametersResult(successful=False, reason='robot_name 不能为空')
+            if p.name == 'max_speed':
+                self.max_speed = p.value
+        return SetParametersResult(successful=True)
+
+    def report(self):
+        name = self.get_parameter('robot_name').value
+        self.get_logger().info(f'{name}: max_speed={self.max_speed}')
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(ParamDemo())
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<h3>命令行操作</h3>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 param list /param_demo
+ros2 param describe /param_demo max_speed     # 查看描述与取值范围
+ros2 param get /param_demo max_speed
+ros2 param set /param_demo max_speed 1.2
+ros2 param set /param_demo max_speed 5.0      # 超出范围，会被拒绝
+ros2 param dump /param_demo > param_demo.yaml # 导出当前参数
+ros2 param load /param_demo param_demo.yaml   # 运行时加载
+
+# 启动时设置
+ros2 run my_first_nodes param_demo --ros-args -p max_speed:=0.8 -p robot_name:=bot_02
+ros2 run my_first_nodes param_demo --ros-args --params-file param_demo.yaml
+</script>
+<h3>参数 YAML 格式</h3>
+<script type="text/plain" class="code" data-lang="yaml" data-file="config/robot.yaml">
+param_demo:                 # 节点名（含命名空间时写 /ns/param_demo）
+  ros__parameters:          # 固定写法，两个下划线
+    max_speed: 0.8
+    robot_name: "bot_02"
+    sensors: ["lidar", "imu", "camera"]
+    debug: true
+
+/**:                         # 通配：对所有节点生效
+  ros__parameters:
+    use_sim_time: false
+</script>
+<h3>C++ 中使用参数</h3>
+<script type="text/plain" class="code" data-lang="cpp">
+declare_parameter("max_speed", 0.5);
+double max_speed = get_parameter("max_speed").as_double();
+
+// 监听修改（必须保存返回的句柄，否则回调会被注销）
+param_cb_ = add_on_set_parameters_callback(
+  [this](const std::vector<rclcpp::Parameter> & params) {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto & p : params) {
+      if (p.get_name() == "max_speed") { max_speed_ = p.as_double(); }
+    }
+    return result;
+  });
+</script>
+<div class="callout tip">
+  <strong>参数的设计原则</strong>
+  <ul>
+    <li>会随部署环境变化的值（速度上限、话题名、设备端口、标定值）都应做成参数，不要写死。</li>
+    <li>为参数写 <code>description</code>，<code>ros2 param describe</code> 与 rqt 都能看到，相当于自带文档。</li>
+    <li>不允许运行时修改的参数可设置 <code>read_only=True</code>。</li>
+  </ul>
+</div>
+
+<h2>5.3 动作（Action）</h2>
+<p>动作用于耗时、需要中间反馈、可能被取消的任务。它的底层实际由 3 个服务 + 2 个话题组成：</p>
+<pre class="diagram">
+  Action Client                                   Action Server
+       │ ── send_goal（服务）──────────────────────► │  接受 / 拒绝目标
+       │ ◄── feedback（话题）────────────────────── │  周期性反馈进度
+       │ ◄── status（话题）──────────────────────── │  目标状态变化
+       │ ── cancel_goal（服务）─────────────────────► │  请求取消
+       │ ── get_result（服务）──────────────────────► │  获取最终结果
+</pre>
+<h3>动作服务器（Python）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/move_server.py">
+import time
+
+import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from my_interfaces.action import MoveDistance
+
+
+class MoveServer(Node):
+    def __init__(self):
+        super().__init__('move_server')
+        self.speed = 0.2   # m/s
+        self._server = ActionServer(
+            self, MoveDistance, 'move_distance',
+            execute_callback=self.execute,
+            goal_callback=self.on_goal,
+            cancel_callback=self.on_cancel,
+            callback_group=ReentrantCallbackGroup())
+
+    def on_goal(self, goal_request):
+        if not 0.0 < goal_request.distance <= 10.0:
+            self.get_logger().warn(f'拒绝目标: {goal_request.distance} m')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def on_cancel(self, goal_handle):
+        self.get_logger().info('收到取消请求')
+        return CancelResponse.ACCEPT
+
+    def execute(self, goal_handle):
+        target = goal_handle.request.distance
+        traveled = 0.0
+        feedback = MoveDistance.Feedback()
+        result = MoveDistance.Result()
+
+        while traveled < target:
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                result.traveled, result.success = traveled, False
+                return result
+            traveled = min(target, traveled + self.speed * 0.1)
+            feedback.remaining = target - traveled
+            goal_handle.publish_feedback(feedback)
+            time.sleep(0.1)       # 在多线程执行器 + 可重入回调组中才可以这样等待
+
+        goal_handle.succeed()
+        result.traveled, result.success = traveled, True
+        return result
+
+
+def main():
+    rclpy.init()
+    executor = MultiThreadedExecutor()
+    executor.add_node(MoveServer())
+    executor.spin()
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<h3>动作客户端（Python）</h3>
+<script type="text/plain" class="code" data-lang="python" data-file="my_first_nodes/my_first_nodes/move_client.py">
+import sys
+
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from my_interfaces.action import MoveDistance
+
+
+class MoveClient(Node):
+    def __init__(self):
+        super().__init__('move_client')
+        self._client = ActionClient(self, MoveDistance, 'move_distance')
+
+    def send(self, distance: float):
+        self._client.wait_for_server()
+        goal = MoveDistance.Goal()
+        goal.distance = distance
+        future = self._client.send_goal_async(goal, feedback_callback=self.on_feedback)
+        future.add_done_callback(self.on_goal_response)
+
+    def on_goal_response(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().warn('目标被拒绝')
+            rclpy.shutdown()
+            return
+        self.get_logger().info('目标已接受')
+        handle.get_result_async().add_done_callback(self.on_result)
+
+    def on_feedback(self, feedback_msg):
+        self.get_logger().info(f'剩余 {feedback_msg.feedback.remaining:.2f} m')
+
+    def on_result(self, future):
+        result = future.result().result
+        self.get_logger().info(f'结束: traveled={result.traveled:.2f} success={result.success}')
+        rclpy.shutdown()
+
+
+def main():
+    rclpy.init()
+    node = MoveClient()
+    node.send(float(sys.argv[1]) if len(sys.argv) > 1 else 1.0)
+    rclpy.spin(node)
+
+
+if __name__ == '__main__':
+    main()
+</script>
+<script type="text/plain" class="code" data-lang="bash">
+ros2 run my_first_nodes move_server
+ros2 run my_first_nodes move_client 1.5
+
+# 命令行发送目标并显示反馈；运行中按 Ctrl+C 会发送取消请求
+ros2 action send_goal /move_distance my_interfaces/action/MoveDistance "{distance: 2.0}" --feedback
+ros2 action info /move_distance
+</script>
+<div class="callout note">
+  <strong>目标状态</strong>
+  <p>一个目标会经历 ACCEPTED → EXECUTING → 终态（SUCCEEDED / CANCELED / ABORTED）。<code>abort()</code> 用于服务器自身判断任务失败（例如遇到障碍），<code>canceled()</code> 用于响应客户端的取消请求。</p>
+</div>
+
+<h2>5.4 如何选择通信方式</h2>
+<table>
+  <thead><tr><th>需求</th><th>选择</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>激光雷达 10 Hz 输出扫描</td><td>Topic</td><td>连续数据流，多个模块都要用</td></tr>
+    <tr><td>查询当前电量</td><td>Topic（周期发布）或 Service</td><td>多处需要就用话题；偶尔查询用服务</td></tr>
+    <tr><td>开 / 关激光雷达电机</td><td>Service</td><td>一次性命令，需要知道成功与否</td></tr>
+    <tr><td>导航到某个房间</td><td>Action</td><td>耗时、需进度、可取消</td></tr>
+    <tr><td>最大速度设置</td><td>Parameter</td><td>配置项</td></tr>
+    <tr><td>速度控制指令</td><td>Topic</td><td>需要高频持续发送，丢一帧无所谓</td></tr>
+    <tr><td>机械臂执行轨迹</td><td>Action</td><td>耗时，需要反馈执行进度</td></tr>
+  </tbody>
+</table>
+
+<h2>5.5 ROS1 对照</h2>
+<table>
+  <thead><tr><th>ROS1</th><th>ROS2</th></tr></thead>
+  <tbody>
+    <tr><td><code>rospy.Service</code> 处理函数返回 Response</td><td>处理函数接收 <code>(request, response)</code>，填好后返回 response</td></tr>
+    <tr><td><code>rospy.ServiceProxy</code> 同步调用</td><td><code>call_async</code> 为主，同步调用需注意死锁</td></tr>
+    <tr><td><code>rosparam</code> 全局参数服务器</td><td>每个节点自己的参数，需先声明</td></tr>
+    <tr><td><code>dynamic_reconfigure</code></td><td>原生支持运行时修改 + <code>add_on_set_parameters_callback</code></td></tr>
+    <tr><td><code>actionlib</code></td><td><code>rclpy.action</code> / <code>rclcpp_action</code>，内置于核心</td></tr>
+  </tbody>
+</table>
+
+<h2>自测题</h2>
+<details class="quiz"><summary>1. 两个节点都创建了名为 <code>/set_mode</code> 的服务端，会怎样？</summary>
+<div>ROS2 不会阻止，但客户端请求会发给哪一个是不确定的，属于设计错误。应保证一个服务名只有一个服务端。</div></details>
+<details class="quiz"><summary>2. <code>ros2 param set /node speed 1.0</code> 报 “Parameter not declared”，为什么？</summary>
+<div>节点没有调用 <code>declare_parameter('speed', ...)</code>。ROS2 默认不允许设置未声明的参数（除非创建节点时设置 <code>allow_undeclared_parameters=True</code>，一般不推荐）。</div></details>
+<details class="quiz"><summary>3. 动作服务器的 execute 回调里用 <code>time.sleep</code>，为什么需要多线程执行器？</summary>
+<div>execute 会长时间运行。若使用单线程执行器，执行期间无法处理取消请求、新目标或其他回调。多线程执行器配合可重入回调组，才能让取消请求在执行过程中被处理。</div></details>
+<details class="quiz"><summary>4. 动作底层由哪些服务和话题组成？</summary>
+<div>3 个服务：send_goal、cancel_goal、get_result；2 个话题：feedback、status。</div></details>
+
+<h2>自查清单</h2>
+<ul class="checklist">
+  <li>写出能正确响应的 SetMode 服务端与客户端</li>
+  <li>理解回调中同步调用服务导致死锁的原因及两种解决方法</li>
+  <li>会用 YAML、命令行、<code>--ros-args -p</code> 三种方式设置参数</li>
+  <li>写出支持取消与拒绝目标的 MoveDistance 动作服务器</li>
+  <li>能根据需求选择 Topic / Service / Action / Parameter</li>
+</ul>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>

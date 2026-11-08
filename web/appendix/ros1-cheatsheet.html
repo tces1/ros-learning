@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>附录 B ROS1 ↔ ROS2 对照 · ROS2 中文教材</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-page="ros1" data-root="../">
+<main class="content">
+
+<h1>附录 B　ROS1 ↔ ROS2 对照</h1>
+<p class="lead">阅读 ROS1 资料、迁移老项目时使用。ROS1 Noetic 已于 2025 年 5 月停止维护。</p>
+
+<h2>B.1 命令行</h2>
+<table>
+  <thead><tr><th>ROS1</th><th>ROS2</th></tr></thead>
+  <tbody>
+    <tr><td><code>roscore</code></td><td>不需要</td></tr>
+    <tr><td><code>rosrun pkg node</code></td><td><code>ros2 run pkg executable</code></td></tr>
+    <tr><td><code>roslaunch pkg file.launch</code></td><td><code>ros2 launch pkg file.launch.py</code></td></tr>
+    <tr><td><code>rosnode list / info</code></td><td><code>ros2 node list / info</code></td></tr>
+    <tr><td><code>rostopic list / echo / hz / pub</code></td><td><code>ros2 topic list / echo / hz / pub</code></td></tr>
+    <tr><td><code>rosservice call</code></td><td><code>ros2 service call /srv pkg/srv/Type "{...}"</code>（需写类型）</td></tr>
+    <tr><td><code>rosparam get / set / dump</code></td><td><code>ros2 param get / set / dump /node name</code>（需指定节点）</td></tr>
+    <tr><td><code>rosmsg show</code> / <code>rossrv show</code></td><td><code>ros2 interface show</code></td></tr>
+    <tr><td><code>rospack find pkg</code></td><td><code>ros2 pkg prefix pkg</code></td></tr>
+    <tr><td><code>roscd pkg</code></td><td><code>colcon_cd pkg</code></td></tr>
+    <tr><td><code>rosbag record / play / info</code></td><td><code>ros2 bag record / play / info</code></td></tr>
+    <tr><td><code>catkin_make</code> / <code>catkin build</code></td><td><code>colcon build</code></td></tr>
+    <tr><td><code>catkin_create_pkg</code></td><td><code>ros2 pkg create</code></td></tr>
+    <tr><td><code>source devel/setup.bash</code></td><td><code>source install/setup.bash</code></td></tr>
+    <tr><td><code>rqt_graph</code> / <code>rviz</code></td><td><code>rqt_graph</code> / <code>rviz2</code></td></tr>
+  </tbody>
+</table>
+
+<h2>B.2 Python API（rospy → rclpy）</h2>
+<table>
+  <thead><tr><th>rospy</th><th>rclpy</th></tr></thead>
+  <tbody>
+    <tr><td><code>rospy.init_node('n')</code></td><td><code>rclpy.init()</code> + 继承 <code>Node</code>，<code>super().__init__('n')</code></td></tr>
+    <tr><td><code>rospy.Publisher(t, T, queue_size=10)</code></td><td><code>self.create_publisher(T, t, 10)</code></td></tr>
+    <tr><td><code>rospy.Subscriber(t, T, cb)</code></td><td><code>self.create_subscription(T, t, cb, 10)</code></td></tr>
+    <tr><td><code>rospy.Service(n, S, handler)</code></td><td><code>self.create_service(S, n, handler)</code>，handler 接收 (req, resp)</td></tr>
+    <tr><td><code>rospy.ServiceProxy(n, S)(req)</code></td><td><code>self.create_client(S, n).call_async(req)</code></td></tr>
+    <tr><td><code>rospy.get_param('~x', 1)</code></td><td><code>self.declare_parameter('x', 1)</code> + <code>get_parameter('x').value</code></td></tr>
+    <tr><td><code>rospy.Rate(10)</code> + <code>while not rospy.is_shutdown()</code></td><td><code>self.create_timer(0.1, cb)</code> + <code>rclpy.spin(node)</code></td></tr>
+    <tr><td><code>rospy.Time.now()</code></td><td><code>self.get_clock().now()</code>；消息中 <code>.to_msg()</code></td></tr>
+    <tr><td><code>rospy.loginfo()</code></td><td><code>self.get_logger().info()</code></td></tr>
+    <tr><td><code>rospy.spin()</code></td><td><code>rclpy.spin(node)</code></td></tr>
+    <tr><td><code>actionlib.SimpleActionClient</code></td><td><code>rclpy.action.ActionClient</code></td></tr>
+    <tr><td><code>tf.TransformListener</code></td><td><code>tf2_ros.Buffer</code> + <code>TransformListener</code></td></tr>
+  </tbody>
+</table>
+
+<h2>B.3 C++ API（roscpp → rclcpp）</h2>
+<table>
+  <thead><tr><th>roscpp</th><th>rclcpp</th></tr></thead>
+  <tbody>
+    <tr><td><code>ros::init(argc, argv, "n")</code> + <code>ros::NodeHandle nh</code></td><td><code>rclcpp::init(argc, argv)</code> + 继承 <code>rclcpp::Node</code></td></tr>
+    <tr><td><code>nh.advertise&lt;T&gt;("t", 10)</code></td><td><code>create_publisher&lt;T&gt;("t", 10)</code></td></tr>
+    <tr><td><code>nh.subscribe("t", 10, &amp;cb)</code></td><td><code>create_subscription&lt;T&gt;("t", 10, cb)</code></td></tr>
+    <tr><td><code>std_msgs::String</code>，头文件 <code>std_msgs/String.h</code></td><td><code>std_msgs::msg::String</code>，头文件 <code>std_msgs/msg/string.hpp</code></td></tr>
+    <tr><td><code>T::ConstPtr</code></td><td><code>T::ConstSharedPtr</code> 或 <code>const T &amp;</code></td></tr>
+    <tr><td><code>ROS_INFO(...)</code></td><td><code>RCLCPP_INFO(get_logger(), ...)</code></td></tr>
+    <tr><td><code>ros::Time::now()</code></td><td><code>now()</code> / <code>get_clock()-&gt;now()</code></td></tr>
+    <tr><td><code>ros::Duration(1.0).sleep()</code></td><td><code>rclcpp::sleep_for(1s)</code>（尽量用定时器代替）</td></tr>
+    <tr><td>nodelet</td><td>component（<code>RCLCPP_COMPONENTS_REGISTER_NODE</code>）</td></tr>
+  </tbody>
+</table>
+
+<h2>B.4 文件与构建</h2>
+<table>
+  <thead><tr><th>ROS1</th><th>ROS2</th></tr></thead>
+  <tbody>
+    <tr><td><code>package.xml</code> format 2</td><td><code>package.xml</code> format 3</td></tr>
+    <tr><td><code>find_package(catkin REQUIRED COMPONENTS ...)</code></td><td>每个依赖单独 <code>find_package(xxx REQUIRED)</code></td></tr>
+    <tr><td><code>catkin_package()</code></td><td><code>ament_package()</code></td></tr>
+    <tr><td><code>add_message_files</code> + <code>generate_messages</code></td><td><code>rosidl_generate_interfaces</code></td></tr>
+    <tr><td>Python 包用 <code>catkin_python_setup()</code></td><td>纯 Python 包使用 <code>ament_python</code> + <code>setup.py</code></td></tr>
+    <tr><td><code>devel/</code> 空间</td><td>没有 devel，只有 <code>install/</code></td></tr>
+    <tr><td>XML launch：<code>&lt;node pkg type name&gt;</code></td><td>XML launch：<code>&lt;node pkg exec name&gt;</code>；推荐 Python launch</td></tr>
+    <tr><td><code>$(find pkg)</code></td><td><code>$(find-pkg-share pkg)</code> / <code>FindPackageShare</code></td></tr>
+    <tr><td><code>&lt;rosparam file=... /&gt;</code></td><td><code>parameters=[yaml]</code>，YAML 需 <code>节点名: ros__parameters:</code> 结构</td></tr>
+  </tbody>
+</table>
+
+<h2>B.5 功能包对应</h2>
+<table>
+  <thead><tr><th>ROS1</th><th>ROS2</th></tr></thead>
+  <tbody>
+    <tr><td><code>move_base</code></td><td>Nav2（<code>bt_navigator</code> + 各服务器）</td></tr>
+    <tr><td><code>amcl</code>、<code>map_server</code></td><td><code>nav2_amcl</code>、<code>nav2_map_server</code></td></tr>
+    <tr><td><code>gmapping</code>、<code>hector_slam</code></td><td><code>slam_toolbox</code>、<code>cartographer_ros</code></td></tr>
+    <tr><td><code>ros_control</code></td><td><code>ros2_control</code></td></tr>
+    <tr><td><code>gazebo_ros_pkgs</code></td><td><code>ros_gz</code>（新版 Gazebo）</td></tr>
+    <tr><td><code>dynamic_reconfigure</code></td><td>原生参数 + 参数回调</td></tr>
+    <tr><td>MoveIt 1</td><td>MoveIt 2</td></tr>
+    <tr><td><code>robot_localization</code></td><td><code>robot_localization</code>（同名，已移植）</td></tr>
+  </tbody>
+</table>
+
+<h2>B.6 迁移步骤建议</h2>
+<ol>
+  <li>先迁移消息 / 服务 / 动作接口包</li>
+  <li>迁移叶子节点（驱动、工具），保持话题名和类型不变</li>
+  <li>用 <code>ros1_bridge</code> 在过渡期连接两套系统（需 Noetic 与 ROS2 同机，且仅支持较老的 ROS2 发行版组合）</li>
+  <li>Launch 重写为 Python，参数 YAML 改为 <code>ros__parameters</code> 结构</li>
+  <li>重点检查：QoS（尤其 latch）、时间 API、全局参数依赖、同步服务调用</li>
+</ol>
+<p>官方迁移指南：<a href="https://docs.ros.org/en/jazzy/How-To-Guides/Migrating-from-ROS1.html" target="_blank" rel="noopener">Migrating from ROS 1</a></p>
+
+</main>
+<script src="../assets/app.js"></script>
+</body>
+</html>
